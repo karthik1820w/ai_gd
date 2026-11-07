@@ -1,3 +1,0 @@
-port: 7880
-rtc: { tcp_port: 7881, udp_port: 7882, use_external_ip: true }
-turn: { enabled: true, udp_port: 3478 }   # built-in TURN relay for participants behind strict firewalls (add domain + tls_port for TURN/TLS)

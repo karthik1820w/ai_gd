@@ -8,47 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  platform-backend:
-    name: AI-GD-Platform backend
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: gd
-          POSTGRES_PASSWORD: gd
-          POSTGRES_DB: gd
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U gd -d gd"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: AI-GD-Platform/backend/package-lock.json
-      - run: npm ci
-        working-directory: AI-GD-Platform/backend
-      - run: npm test
-        working-directory: AI-GD-Platform/backend
-        env:
-          DATABASE_URL: postgresql://gd:gd@localhost:5432/gd
-          REDIS_URL: redis://localhost:6379
-
   quorum:
     name: AI_GD typecheck, tests, and build
     runs-on: ubuntu-latest
