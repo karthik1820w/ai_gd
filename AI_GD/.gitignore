@@ -1,0 +1,17 @@
+node_modules
+bin/
+.next
+data/*.db
+data/*.db-journal
+data/recordings
+prisma/*.db
+prisma/*.db-journal
+prisma/*.db-shm
+prisma/*.db-wal
+certs
+.env
+*.log
+.DS_Store
+dist
+coverage
+*.tsbuildinfo

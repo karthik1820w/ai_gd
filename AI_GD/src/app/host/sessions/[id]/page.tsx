@@ -1,0 +1,75 @@
+import Link from "next/link";
+import { notFound, redirect } from "next/navigation";
+import { prisma } from "@/lib/db";
+import { readSession } from "@/lib/auth";
+import { formatClock, formatWhen } from "@/lib/format";
+import { CopyLine } from "@/components/JoinForm";
+import { HostActions, HostFeedback } from "@/components/HostTools";
+import { ScoreChart } from "@/components/ReportView";
+
+export const dynamic = "force-dynamic";
+
+export default async function HostSessionPage({ params }: { params: Promise<{ id: string }> }) {
+  const user = await readSession();
+  if (!user) redirect("/login");
+  const { id } = await params;
+  const discussion = await prisma.discussion.findUnique({
+    where: { id },
+    include: {
+      accessCodes: { where: { active: true }, take: 1 },
+      participants: { include: { stat: true, evaluation: { include: { parameters: true, notes: true } }, user: true } },
+      summary: { include: { points: true } },
+      recordings: true,
+    },
+  });
+  if (!discussion || discussion.hostId !== user.id) notFound();
+  const code = discussion.accessCodes[0]?.code ?? "";
+  const origin = process.env.APP_URL || "http://localhost:3000";
+  const guests = discussion.participants.filter((person) => person.userId !== user.id);
+  return (
+    <>
+      <p className="pill">{discussion.status}</p>
+      <h1 className="serif" style={{ marginBottom: 4 }}>{discussion.title}</h1>
+      <p className="muted">{discussion.topic}</p>
+      <div className="card card-pad list" style={{ marginBottom: 16 }}>
+        <CopyLine label="Meeting ID" value={discussion.meetingId} />
+        <CopyLine label="Access code" value={code} />
+        <CopyLine label="Shareable URL" value={`${origin}/meeting/${discussion.meetingId}?code=${code}`} />
+        <HostActions id={discussion.id} status={discussion.status} meetingId={discussion.meetingId} />
+      </div>
+      <section className="card card-pad" style={{ marginBottom: 16 }}>
+        <h2 className="serif">People</h2>
+        {guests.length === 0 && <p className="muted">Nobody else has joined. Share the code, or invite an email that already has an account.</p>}
+        {guests.map((person) => (
+          <p key={person.id}><strong>{person.displayName}</strong> <span className="muted">{person.user.email} · {formatClock(person.stat?.speakingMs ?? 0)} speaking · {person.stat?.contributionCount ?? 0} lines</span></p>
+        ))}
+      </section>
+      {discussion.status === "COMPLETED" && (
+        <>
+          <section className="card card-pad" style={{ marginBottom: 16 }}>
+            <h2 className="serif">Session analytics</h2>
+            <p>Engagement (share of on-topic lines): {discussion.summary?.engagementScore ?? 0}%</p>
+            <ScoreChart rows={guests.flatMap((person) => person.evaluation?.overallScore == null ? [] : [{ name: person.displayName, score: person.evaluation.adjustedScore ?? person.evaluation.overallScore }])} />
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=SUMMARY`}>Summary PDF</a>
+              <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=COMBINED&download=1`}>Combined scores PDF</a>
+              <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=TRANSCRIPT`}>Transcript PDF</a>
+              <a className="btn btn-ghost" href={`/host/sessions/${discussion.id}/preview`}>Preview a PDF</a>
+            </div>
+            {discussion.summary?.points.map((point) => <p key={point.id}><strong>{point.kind.toLowerCase()}: </strong>{point.body}</p>)}
+          </section>
+          {guests.map((person) => person.evaluation && (
+            <section key={person.id} className="card card-pad" style={{ marginBottom: 12 }}>
+              <h3>{person.displayName} · {person.evaluation.adjustedScore ?? person.evaluation.overallScore ?? "Incomplete"} · {person.evaluation.category}</h3>
+              <a href={`/api/discussions/${discussion.id}/pdf?type=INDIVIDUAL&participantId=${person.id}&download=1`}>Download individual PDF</a>
+              {discussion.recordings.filter((recording) => recording.participantId === person.id).map((recording) => <p key={recording.id}><a href={`/api/recordings/${recording.id}`}>Microphone recording</a></p>)}
+              <HostFeedback discussionId={discussion.id} evaluationId={person.evaluation.id} />
+            </section>
+          ))}
+        </>
+      )}
+      <p className="muted">Scheduled {formatWhen(discussion.scheduledAt)} · {discussion.durationMin} minutes · {discussion.mode === "AI_MODERATED" ? "AI-moderated" : "Free-flow"}</p>
+      <p><Link href="/host">Back to dashboard</Link></p>
+    </>
+  );
+}

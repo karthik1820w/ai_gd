@@ -1,0 +1,17 @@
+{
+ "name": "gd-backend",
+ "type": "module",
+ "scripts": {
+  "start": "node src/server.js",
+  "test": "node --test --test-force-exit ../tests/unit/*.test.js ../tests/integration/*.test.js"
+ },
+ "dependencies": {
+  "@livekit/rtc-node": "^1.2.1",
+  "jsonwebtoken": "^9.0.3",
+  "livekit-client": "^2.23.0",
+  "livekit-server-sdk": "^2.19.2",
+  "pg": "^8.23.1",
+  "redis": "^4.7.1",
+  "ws": "^8.18.0"
+ }
+}

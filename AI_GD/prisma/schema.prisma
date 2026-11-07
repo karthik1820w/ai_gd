@@ -1,0 +1,390 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  HOST
+  PARTICIPANT
+}
+
+enum DiscussionMode {
+  FREE_FLOW
+  AI_MODERATED
+}
+
+enum DiscussionStatus {
+  SCHEDULED
+  LIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum Relevance {
+  PENDING
+  HIGHLY_RELEVANT
+  RELEVANT
+  PARTIALLY_RELEVANT
+  IRRELEVANT
+}
+
+enum ReportType {
+  INDIVIDUAL
+  SUMMARY
+  COMBINED
+  TRANSCRIPT
+}
+
+enum NoteKind {
+  STRENGTH
+  IMPROVEMENT
+  REMARK
+  EVIDENCE
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role
+  speechLang   String   @default("en-IN")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  hosted        Discussion[]            @relation("HostedDiscussions")
+  memberships   DiscussionParticipant[]
+  notifications Notification[]
+  resets        PasswordReset[]
+  chats         ChatMessage[]
+  adjustments   Evaluation[]            @relation("AdjustedBy")
+}
+
+model PasswordReset {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Discussion {
+  id                    String           @id @default(cuid())
+  hostId                String
+  title                 String
+  topic                 String
+  description           String
+  rules                 String
+  scheduledAt           DateTime
+  durationMin           Int
+  speakingTimeSec       Int
+  maxParticipants       Int
+  mode                  DiscussionMode
+  moderatorEnabled      Boolean          @default(true)
+  transcriptionEnabled  Boolean          @default(true)
+  recordingEnabled      Boolean          @default(false)
+  silencePromptSec      Int              @default(25)
+  retentionDays         Int?
+  meetingId             String           @unique
+  status                DiscussionStatus @default(SCHEDULED)
+  startedAt             DateTime?
+  endedAt               DateTime?
+  transcriptsPurgedAt   DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  host          User                     @relation("HostedDiscussions", fields: [hostId], references: [id], onDelete: Cascade)
+  accessCodes   AccessCode[]
+  participants  DiscussionParticipant[]
+  transcript    Transcript?
+  segments      TranscriptSegment[]
+  events        ModeratorEvent[]
+  missed        MissedOpportunity[]
+  technical     TechnicalIssue[]
+  summary       DiscussionSummary?
+  recordings    Recording[]
+  reports       Report[]
+  notifications Notification[]
+  messages      ChatMessage[]
+  evaluations   Evaluation[]
+
+  @@index([hostId, status])
+  @@index([scheduledAt])
+}
+
+model AccessCode {
+  id           String     @id @default(cuid())
+  discussionId String
+  code         String
+  active       Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  discussion   Discussion @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+
+  @@index([discussionId, active])
+  @@index([code])
+}
+
+model DiscussionParticipant {
+  id                   String    @id @default(cuid())
+  discussionId         String
+  userId               String
+  displayName          String
+  joinedAt             DateTime?
+  leftAt               DateTime?
+  removed              Boolean   @default(false)
+  micLocked            Boolean   @default(false)
+  mediaReady           Boolean   @default(false)
+  speechAvailable      Boolean   @default(true)
+  transcriptionConsent Boolean   @default(false)
+  recordingConsent     Boolean   @default(false)
+  consentAt            DateTime?
+  createdAt            DateTime  @default(now())
+
+  discussion Discussion      @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  segments   TranscriptSegment[]
+  stat       SpeakingStat?
+  evaluation Evaluation?
+  missed     MissedOpportunity[]
+  technical  TechnicalIssue[]
+  recording  Recording?
+
+  @@unique([discussionId, userId])
+  @@index([discussionId])
+}
+
+model Transcript {
+  id           String              @id @default(cuid())
+  discussionId String              @unique
+  createdAt    DateTime            @default(now())
+  discussion   Discussion          @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+  segments     TranscriptSegment[]
+}
+
+model TranscriptSegment {
+  id                    String                 @id @default(cuid())
+  transcriptId          String
+  discussionId          String
+  participantId         String
+  text                  String
+  startedAt             DateTime
+  endedAt               DateTime
+  relevance             Relevance              @default(PENDING)
+  relevanceReason       String                 @default("")
+  analysisSource        String                 @default("pending")
+  newPerspective        Boolean                @default(false)
+  repeatsPrior          Boolean                @default(false)
+  logicalArgument       Boolean                @default(false)
+  hasEvidence           Boolean                @default(false)
+  respondsToOthers      Boolean                @default(false)
+  positiveContribution  Boolean                @default(false)
+  communicationScore    Float?
+  knowledgeScore        Float?
+  reasoningScore        Float?
+  wordCount             Int                    @default(0)
+  createdAt             DateTime               @default(now())
+
+  transcript  Transcript             @relation(fields: [transcriptId], references: [id], onDelete: Cascade)
+  discussion  Discussion             @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+  participant DiscussionParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@index([discussionId, startedAt])
+  @@index([participantId])
+}
+
+model SpeakingStat {
+  id                      String                 @id @default(cuid())
+  participantId           String                 @unique
+  speakingMs              Int                    @default(0)
+  contributionCount       Int                    @default(0)
+  relevantCount           Int                    @default(0)
+  partialCount            Int                    @default(0)
+  irrelevantCount         Int                    @default(0)
+  newIdeas                Int                    @default(0)
+  constructiveResponses   Int                    @default(0)
+  missedOpportunities     Int                    @default(0)
+  technicalIssues         Int                    @default(0)
+  updatedAt               DateTime               @updatedAt
+  participant             DiscussionParticipant  @relation(fields: [participantId], references: [id], onDelete: Cascade)
+}
+
+model Evaluation {
+  id                    String                 @id @default(cuid())
+  discussionId          String
+  participantId         String                 @unique
+  overallScore          Float?
+  category              String
+  participationPercent  Float                  @default(0)
+  speakingMs            Int                    @default(0)
+  contributionCount     Int                    @default(0)
+  relevantCount         Int                    @default(0)
+  irrelevantCount       Int                    @default(0)
+  partialCount          Int                    @default(0)
+  newIdeas              Int                    @default(0)
+  constructiveResponses Int                    @default(0)
+  missedCount           Int                    @default(0)
+  averageRelevance      Float?
+  incomplete            Boolean                @default(false)
+  incompleteReason      String?
+  adjustedScore         Float?
+  adjustmentReason      String?
+  adjustedById          String?
+  adjustedAt            DateTime?
+  formulaVersion        String                 @default("1")
+  createdAt             DateTime               @default(now())
+
+  discussion  Discussion             @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+  participant DiscussionParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  adjustedBy  User?                  @relation("AdjustedBy", fields: [adjustedById], references: [id])
+  parameters  EvaluationParameter[]
+  notes       EvaluationNote[]
+
+  @@index([discussionId])
+}
+
+model EvaluationParameter {
+  id           String     @id @default(cuid())
+  evaluationId String
+  key          String
+  label        String
+  weight       Float
+  score        Float?
+  explanation  String
+  evaluation   Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+
+  @@unique([evaluationId, key])
+}
+
+model EvaluationNote {
+  id           String     @id @default(cuid())
+  evaluationId String
+  kind         NoteKind
+  body         String
+  evaluation   Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+
+  @@index([evaluationId, kind])
+}
+
+model ModeratorEvent {
+  id            String     @id @default(cuid())
+  discussionId  String
+  situation     String
+  message       String
+  source        String
+  targetUserId  String?
+  createdAt     DateTime   @default(now())
+  discussion    Discussion @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+
+  @@index([discussionId, createdAt])
+}
+
+model MissedOpportunity {
+  id            String                 @id @default(cuid())
+  discussionId  String
+  participantId String
+  reason        String
+  windowSec     Int
+  createdAt     DateTime               @default(now())
+  discussion    Discussion             @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+  participant   DiscussionParticipant  @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@index([discussionId])
+  @@index([participantId])
+}
+
+model TechnicalIssue {
+  id            String                @id @default(cuid())
+  discussionId  String
+  participantId String
+  kind          String
+  detail        String                @default("")
+  createdAt     DateTime              @default(now())
+  discussion    Discussion            @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+  participant   DiscussionParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@index([participantId])
+}
+
+model Recording {
+  id            String                @id @default(cuid())
+  discussionId  String
+  participantId String                @unique
+  path          String
+  bytes         Int
+  mime          String
+  createdAt     DateTime              @default(now())
+  discussion    Discussion            @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+  participant   DiscussionParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+}
+
+model DiscussionSummary {
+  id                      String         @id @default(cuid())
+  discussionId            String         @unique
+  mostActiveParticipantId String?
+  leastActiveParticipantId String?
+  engagementScore         Float?
+  source                  String
+  createdAt               DateTime       @default(now())
+  discussion              Discussion     @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+  points                  SummaryPoint[]
+}
+
+model SummaryPoint {
+  id        String             @id @default(cuid())
+  summaryId String
+  kind      String
+  body      String
+  sortOrder Int
+  summary   DiscussionSummary  @relation(fields: [summaryId], references: [id], onDelete: Cascade)
+
+  @@index([summaryId, kind, sortOrder])
+}
+
+model Report {
+  id               String     @id @default(cuid())
+  discussionId     String
+  participantId    String?
+  type             ReportType
+  createdAt        DateTime   @default(now())
+  lastDownloadedAt DateTime?
+  discussion       Discussion @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+
+  @@index([discussionId, type])
+}
+
+model Notification {
+  id           String      @id @default(cuid())
+  userId       String
+  discussionId String?
+  type         String
+  title        String
+  body         String
+  href         String      @default("")
+  readAt       DateTime?
+  createdAt    DateTime    @default(now())
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  discussion   Discussion? @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+}
+
+model ChatMessage {
+  id           String     @id @default(cuid())
+  discussionId String
+  userId       String
+  name         String
+  text         String
+  createdAt    DateTime   @default(now())
+  discussion   Discussion @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([discussionId, createdAt])
+}
