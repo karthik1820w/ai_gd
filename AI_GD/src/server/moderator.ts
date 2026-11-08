@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
-import { aiEnabled, complete } from "@/server/ai";
+import { aiEnabled, complete, parseJson } from "@/server/ai";
+import { aliasPeople, aliasText, deAlias, MODERATOR_SCHEMA, taskPrompt, type AliasEntry } from "@/server/aiPrompts";
 import { markLive, recordInvite, rememberPrompt, room, snapshot } from "@/server/activity";
 import { emitDiscussion } from "@/server/realtime";
 import { endDiscussion } from "@/server/evaluate";
@@ -17,18 +18,36 @@ const TEMPLATES = {
   WRAP_UP: () => ["We are near the end of the scheduled time. Let's hear brief closing points."],
 };
 
-async function promptText(situation: string, fallback: string, name?: string) {
+async function promptText(
+  situation: string,
+  fallback: string,
+  name?: string,
+  discussionId?: string,
+  people: AliasEntry[] = [],
+  recentLines: Array<{ userId: string; text: string }> = [],
+  briefing = "",
+) {
   if (!aiEnabled()) return { text: fallback, source: "template" };
+  const roster = name && !people.some((person) => person.name === name)
+    ? [...people, { id: "target", name }]
+    : people;
+  const aliases = aliasPeople(roster);
+  const target = roster.find((person) => person.name === name);
+  const context = recentLines.slice(-5).map((line) => `${aliases.byId.get(line.userId) ?? "speaker"}: ${aliasText(line.text, aliases)}`).join("\n");
   try {
     const raw = await complete(
-      "You are a calm group-discussion moderator. Rewrite the draft as one sentence under 280 characters. Do not add facts. Keep any person's name.",
-      `Situation: ${situation}. Draft: ${fallback}`,
+      taskPrompt("MODERATOR", "Write one open-ended question of at most 25 words for a group discussion. Build on a recent point or a rubric item if available. Do not add facts, judge participants, or discuss scores. Keep the invited participant's alias as the addressee; the server will restore their name. Return JSON with one string field question."),
+      `Situation: ${situation}\n<briefing>${aliasText(briefing, aliases)}</briefing>\n<draft>${aliasText(fallback, aliases)}</draft>\n<recent_transcript>\n${context}\n</recent_transcript>`,
+      { tier: "flash", timeoutMs: situation === "INVITE" ? 2500 : 20_000, retries: situation === "INVITE" ? 0 : 2, responseSchema: MODERATOR_SCHEMA, roomId: discussionId },
     );
-    const text = raw?.replace(/\s+/g, " ").trim() ?? "";
-    if (!text || text.length > 280) return { text: fallback, source: "template" };
-    if (name && !text.includes(name)) return { text: fallback, source: "template" };
-    return { text, source: "model" };
-  } catch {
+    if (!raw) return { text: fallback, source: "template" };
+    const parsed = parseJson(raw);
+    const question = typeof parsed.question === "string" ? deAlias(parsed.question.replace(/\s+/g, " ").trim(), aliases) : "";
+    if (!question || question.split(/\s+/).length > 25) return { text: fallback, source: "template" };
+    if (name && target && !question.includes(name)) return { text: fallback, source: "template" };
+    return { text: question, source: "gemini" };
+  } catch (error) {
+    console.error("Gemini moderator prompt failed; using the template.", error);
     return { text: fallback, source: "template" };
   }
 }
@@ -54,7 +73,7 @@ export async function moderateLive() {
     where: { status: "LIVE" },
     include: {
       participants: { include: { stat: true } },
-      segments: { orderBy: { startedAt: "desc" }, take: 3 },
+      segments: { orderBy: { startedAt: "desc" }, take: 5, include: { participant: true } },
     },
   });
   const now = Date.now();
@@ -80,14 +99,14 @@ export async function moderateLive() {
 
     const remaining = durationMs - elapsed;
     if (remaining < 90_000 && remaining > 0 && !live.situations.has("WRAP_UP")) {
-      const spoken = await promptText("WRAP_UP", TEMPLATES.WRAP_UP()[0]);
+      const spoken = await promptText("WRAP_UP", TEMPLATES.WRAP_UP()[0], undefined, discussion.id);
       await say(discussion.id, "WRAP_UP", spoken.text, spoken.source);
       continue;
     }
 
     const recent = discussion.segments;
     if (recent.length >= 3 && recent.every((segment) => segment.relevance === "IRRELEVANT") && !live.situations.has("OFF_TOPIC")) {
-      const spoken = await promptText("OFF_TOPIC", TEMPLATES.OFF_TOPIC(discussion.topic)[0]);
+      const spoken = await promptText("OFF_TOPIC", TEMPLATES.OFF_TOPIC(discussion.topic)[0], undefined, discussion.id);
       await say(discussion.id, "OFF_TOPIC", spoken.text, spoken.source);
       continue;
     }
@@ -97,7 +116,7 @@ export async function moderateLive() {
     const dominant = [...active].sort((a, b) => (b.stat?.speakingMs ?? 0) - (a.stat?.speakingMs ?? 0))[0];
     const silent = active.filter((participant) => (participant.stat?.contributionCount ?? 0) === 0 && participant.userId !== discussion.hostId);
     if (dominant && totalSpeech > 45_000 && active.length >= 3 && (dominant.stat?.speakingMs ?? 0) / totalSpeech > 0.65 && silent.length && !live.situations.has(`BALANCE-${dominant.userId}`)) {
-      const spoken = await promptText("BALANCE", TEMPLATES.BALANCE()[0]);
+      const spoken = await promptText("BALANCE", TEMPLATES.BALANCE()[0], undefined, discussion.id);
       await say(discussion.id, "BALANCE", spoken.text, spoken.source, dominant.userId);
       live.situations.add(`BALANCE-${dominant.userId}`);
       continue;
@@ -125,7 +144,17 @@ export async function moderateLive() {
         if (candidateParticipant) {
           const seconds = discussion.speakingTimeSec;
           const fallback = `${candidateParticipant.displayName}, we have not heard your thoughts recently. You have about ${seconds} seconds if you would like to speak.`;
-          const spoken = await promptText("INVITE", fallback, candidateParticipant.displayName);
+          const people = active.map((person) => ({ id: person.userId, name: person.displayName }));
+          const recentLines = discussion.segments.slice().reverse().map((segment) => ({ userId: segment.participant.userId, text: segment.text }));
+          const briefing = (() => {
+            try {
+              const parsed = discussion.aiBrief ? JSON.parse(discussion.aiBrief) as Record<string, unknown> : {};
+              return parsed.status === "ready" ? JSON.stringify({ summary: parsed.summary, key_concepts: parsed.key_concepts, rubric: parsed.rubric }).slice(0, 2000) : "";
+            } catch {
+              return "";
+            }
+          })();
+          const spoken = await promptText("INVITE", fallback, candidateParticipant.displayName, discussion.id, people, recentLines, briefing);
           live.invites.set(nextSpeaker.id, {
             participantId: candidateParticipant.id,
             until: now + seconds * 1000,
@@ -148,12 +177,12 @@ export async function moderateLive() {
 
     if (quietFor > discussion.silencePromptSec * 1000 && !live.situations.has("SILENCE-OPEN")) {
       const choices = TEMPLATES.SILENCE(discussion.topic);
-      const spoken = await promptText("SILENCE", choices[Math.floor(Math.random() * choices.length)]);
+      const spoken = await promptText("SILENCE", choices[Math.floor(Math.random() * choices.length)], undefined, discussion.id);
       await say(discussion.id, "SILENCE", spoken.text, spoken.source);
       live.situations.add("SILENCE-OPEN");
     } else if (quietFor > discussion.silencePromptSec * 1000 && now - live.lastPromptAt > 75_000) {
       const choices = TEMPLATES.SILENCE(discussion.topic);
-      const spoken = await promptText("SILENCE", choices[Math.floor(Math.random() * choices.length)]);
+      const spoken = await promptText("SILENCE", choices[Math.floor(Math.random() * choices.length)], undefined, discussion.id);
       await say(discussion.id, "SILENCE", spoken.text, spoken.source);
     }
   }

@@ -39,26 +39,23 @@ Modes:
 
 ## Scoring
 
-Scores are out of 100. Formula version `1`. Weights:
+Scores are out of 100. Overall weights default to `40,25,35` and are normalized if configured:
 
-| Part | Weight |
+| Pillar | Default weight |
 | --- | ---: |
-| Topic relevance | 25% |
-| Communication and clarity | 20% |
-| Knowledge and content | 20% |
-| Participation and initiative | 15% |
-| Logical reasoning | 10% |
-| Listening and engagement | 10% |
+| Knowledge and understanding | 40% |
+| Participation | 25% |
+| Point of view and thinking | 35% |
 
-Each spoken line is labeled **Highly relevant**, **Relevant**, **Partially relevant**, or **Irrelevant**, with a short reason. The label uses the topic, earlier lines, and whether the person is responding to someone else.
+Knowledge combines live understanding, accuracy, and relevance analysis with the final Gemini evaluation when available. Thinking combines reasoning, originality, and responses to others. Participation is calculated by application code from contributions, speech share, missed invitations, and technical status. Set `AI_WEIGHTS` to three comma-separated weights to change the normalized blend.
 
-The report also includes speaking time, contribution count, relevant and irrelevant lines, new ideas, constructive responses, missed opportunities, participation share, and average relevance. Feedback quotes real transcript lines. A line is stored as evidence only when it is relevant or highly relevant.
+Each spoken line is labeled **Highly relevant**, **Relevant**, **Partially relevant**, or **Irrelevant** and, when Gemini is available, also receives an accuracy label, concepts, and short live analysis. The report includes speaking time, contribution count, missed opportunities, participation share, and evidence from the transcript.
 
 What is deliberately not scored: appearance, facial expression, gender, accent, and personality.
 
 Special cases:
 
-- No speech, and the microphone was working: participation is low and content is 0.
+- No speech: knowledge and thinking are 0, with the deterministic note “No contributions were recorded.” Participation is still calculated by code.
 - Speech recognition unavailable, no media, or a disconnect with zero speech: the report is **Incomplete**. The overall score is empty. It is not a fake low content score.
 - A muted microphone is not punished when the person already contributed enough (at least three contributions, or a speaking share close to a fair share).
 - A missed invite counts only when the person has fewer than three contributions.
@@ -66,21 +63,24 @@ Special cases:
 
 The host can correct a score. The correction requires a reason, and the original score stays visible.
 
-## Language model
+## Gemini AI
 
-With `AI_API_KEY` empty, relevance, moderator lines, and the closing summary use the built-in lexical model. The transcript says **lexical model**. That is not a language model.
+With no Gemini key, AI analysis, topic briefings, Q&A, and final AI evaluation are disabled or fall back to the built-in heuristics. The UI and reports identify heuristic results; they do not represent them as Gemini output.
 
-To use Groq's free tier, create a key at https://console.groq.com (no card) and put it in `.env`:
+Create a Gemini API key in Google AI Studio and place it in `AI_GD/.env`. A single `GEMINI_API_KEY` works for both live and final tasks; separate keys and model names are optional:
 
 ```
-AI_BASE_URL=https://api.groq.com/openai/v1
-AI_API_KEY=your-key
-AI_MODEL=llama-3.3-70b-versatile
+AI_ENABLED=on
+GEMINI_API_KEY=your-server-side-key
+GEMINI_FLASH_MODEL=gemini-2.5-flash
+GEMINI_FINAL_MODEL=gemini-2.5-flash
 ```
 
-Restart `npm run dev` after changing `.env`. The same three variables work with OpenAI, or with a local Ollama server at `http://127.0.0.1:11434/v1` and any non-empty `AI_API_KEY`. The key stays on the server. This computer had no Groq, OpenAI, or Gemini key, so scoring stays lexical until you paste one.
+For separate keys, set `GEMINI_FLASH_API_KEY` for live analysis and `GEMINI_API_KEY` for final work. Either key alone can service both tiers. `AI_ENABLED=off` disables all Gemini calls. Restart `npm run dev` after changing `.env`. Keep API keys server-side; never expose them through `NEXT_PUBLIC_*` variables or commit `.env`.
 
-If the model call fails or times out (20 seconds), that line falls back to the lexical label. Pending lines are finished lexically when the meeting is scored, so ending a meeting does not wait on the model.
+Gemini requests use bounded concurrency, prioritized final work, retries for transient errors, and per-discussion call budgets. On an outage, invalid key, timeout, or rate limit, live analysis and final scoring fall back to heuristics. The app does not claim that heuristic output came from Gemini.
+
+**Privacy and cost:** When AI is enabled, discussion transcripts and host-provided context are sent to Google Gemini for analysis and evaluation. The join screen discloses this. Review Google's data-use terms for your API plan before enabling the feature. Gemini API use may incur cost and is subject to model quotas/rate limits. Optional search grounding is off by default; enable it with `GEMINI_GROUNDING=on` for Q&A, and verify any sourced claims independently.
 
 ## AI moderator
 
@@ -92,7 +92,7 @@ The moderator runs about every four seconds, one action at a time, and only whil
 - Redirect the room when the recent lines are off topic.
 - Give a closing summary near the end.
 
-Default wording is a template. A language model rewrites it only when `AI_API_KEY` is set, and the template is kept if the rewrite is too long or drops the person's name.
+Default wording is a template. Gemini may create an aliased, tailored question when enabled; the template is kept if generation fails or exceeds the word limit.
 
 ## Video
 
@@ -164,9 +164,15 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | SQLite file, default `file:./dev.db` next to the Prisma schema |
-| `JWT_SECRET` | Signs the `quorum_token` session cookie (7 days, httpOnly) |
+| `JWT_SECRET` | Required; signs the `quorum_token` session cookie (at least 16 characters) |
 | `APP_URL` | Public origin, used in links |
-| `AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL` | Optional language model. Empty key means lexical scoring |
+| `AI_ENABLED` | Set to `off` to disable Gemini even when a key is configured |
+| `GEMINI_API_KEY`, `GEMINI_FLASH_API_KEY` | Server-side Gemini keys; either one can be used for both tiers |
+| `GEMINI_BASE_URL`, `GEMINI_FLASH_MODEL`, `GEMINI_FINAL_MODEL` | Optional API endpoint and tier models |
+| `GEMINI_CONCURRENCY`, `GEMINI_MAX_QUEUE`, `AI_MAX_CALLS_PER_ROOM` | AI queue and discussion-call limits |
+| `AI_WEIGHTS` | Three comma-separated weights for knowledge, participation, and thinking; default `40,25,35` |
+| `GEMINI_GROUNDING` | Optional Q&A search grounding; default `off` |
+| `REPORT_VISIBILITY` | Reserved report visibility setting; default `own` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Password-reset and invite email. Empty SMTP shows the reset link on the page in development |
 | `LIVEKIT_HOST` | Media server HTTP address, default `http://127.0.0.1:7880` |
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Must match the key pair passed to the media server |

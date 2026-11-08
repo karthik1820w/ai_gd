@@ -20,13 +20,17 @@ type DiscussionInfo = {
   moderatorEnabled: boolean;
   transcriptionEnabled: boolean;
   recordingEnabled: boolean;
+  aiEnabled?: boolean;
+  brief?: TopicBrief | null;
   isHost: boolean;
   displayName: string;
 };
 
-type Segment = { id: string; userId: string; name: string; text: string; startedAt: string; relevance: string; relevanceReason: string; analysisSource: string };
+type Segment = { id: string; userId: string; name: string; text: string; startedAt: string; relevance: string; relevanceReason: string; analysisSource: string; accuracy?: string; correction?: string; concepts?: string[]; gist?: string };
 type Peer = { socketId: string; userId: string; name: string; stream: MediaStream; audio: boolean; video: boolean; hand: boolean; speaking: boolean };
 type RosterEntry = { userId: string; name: string; isHost: boolean; connected: boolean; audio: boolean; video: boolean; hand: boolean; speaking: boolean; micLocked: boolean; speakingMs: number; contributions: number; relevant: number; irrelevant: number; missed: number; technical: number; q?: "good" | "fair" | "poor" | string };
+type TopicBrief = { status: "pending" | "ready" | "failed" | "off"; source?: string; model?: string; summary?: string; key_concepts?: Array<{ term: string; definition: string }>; key_facts?: string[]; arguments_for?: string[]; arguments_against?: string[]; rubric?: string[] };
+type LiveScore = { participantId: string; userId: string; name: string; knowledge: number; participation: number; thinking: number; overall: number; source: string };
 
 export function MeetingApp({ discussion, user, code }: { discussion: DiscussionInfo; user: { id: string; name: string; speechLang: string }; code?: string }) {
   const [stage, setStage] = useState<"lobby" | "room">("lobby");
@@ -40,6 +44,8 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [audioId, setAudioId] = useState("");
   const [videoId, setVideoId] = useState("");
+  const [aiOn, setAiOn] = useState(Boolean(discussion.aiEnabled));
+  const [brief] = useState<TopicBrief | null>(discussion.brief ?? null);
   const previewRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -78,6 +84,14 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
     })();
     return () => { closed = true; cancelAnimationFrame(meter); };
   }, []);
+  useEffect(() => {
+    let active = true;
+    void fetch("/api/config")
+      .then((response) => response.json())
+      .then((data: { ai?: boolean }) => { if (active) setAiOn(Boolean(data.ai)); })
+      .catch(() => { if (active) setAiOn(false); });
+    return () => { active = false; };
+  }, []);
 
   function togglePreview(kind: "audio" | "video", on: boolean) {
     streamRef.current?.getTracks().filter((track) => track.kind === kind).forEach((track) => { track.enabled = on; });
@@ -111,6 +125,12 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
         <p className="pill">{discussion.mode === "AI_MODERATED" ? "AI-moderated" : "Free-flow"}</p>
         <h1 className="serif" style={{ fontSize: 40, marginBottom: 4 }}>{discussion.title}</h1>
         <p className="muted">Topic: {discussion.topic}</p>
+        {aiOn && <section className="card card-pad" style={{ marginBottom: 16 }}>
+          <h2 className="serif">Topic primer</h2>
+          {brief?.status === "pending" && <p className="muted">Preparing the briefing…</p>}
+          {brief?.status === "failed" && <p className="muted">Gemini briefing unavailable.</p>}
+          {brief?.status === "ready" && <><p>{brief.summary}</p>{brief.key_concepts?.map((concept) => <p key={concept.term}><strong>{concept.term}</strong>: {concept.definition}</p>)}</>}
+        </section>}
         <div style={{ display: "grid", gridTemplateColumns: "1.2fr .8fr", gap: 16 }}>
           <div className="card" style={{ overflow: "hidden", minHeight: 280, background: "#121a17", position: "relative" }}>
             <video ref={previewRef} autoPlay muted playsInline style={{ width: "100%", height: 320, objectFit: "cover", transform: "scaleX(-1)" }} />
@@ -137,6 +157,7 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
             </div>
             {discussion.transcriptionEnabled && <label><input type="checkbox" checked={consentT} onChange={(event) => setConsentT(event.target.checked)} /> I agree to live transcription of my microphone and to storing the text for evaluation.</label>}
             {discussion.recordingEnabled && <label><input type="checkbox" checked={consentR} onChange={(event) => setConsentR(event.target.checked)} /> I agree to an audio recording of my microphone being stored for the host.</label>}
+            {aiOn && <p className="muted" role="note">AI analysis is enabled. Your transcript may be sent to Google Gemini for analysis and evaluation.</p>}
             <p className="muted">Speech is recognised in this browser and attributed to you, because the audio never mixes with anyone else before transcription.</p>
             {error && <p className="error">{error}</p>}
             <button className="btn btn-primary">Join meeting</button>
@@ -156,7 +177,7 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
   const [interim, setInterim] = useState("");
   const [chat, setChat] = useState<Array<{ id: string; userId: string; name: string; text: string }>>([]);
   const [prompts, setPrompts] = useState<Array<{ id: string; message: string; source: string }>>([]);
-  const [panel, setPanel] = useState<"transcript" | "people" | "chat" | "monitor">("transcript");
+  const [panel, setPanel] = useState<"transcript" | "people" | "chat" | "monitor" | "ai">("transcript");
   const [micOn, setMicOn] = useState(initialMic);
   const [camOn, setCamOn] = useState(initialCam);
   const [hand, setHand] = useState(false);
@@ -171,6 +192,16 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
   const [draft, setDraft] = useState("");
   const [ended, setEnded] = useState<string | null>(null);
   const [voice, setVoice] = useState(true);
+  const [aiOn, setAiOn] = useState(false);
+  const [brief, setBrief] = useState<TopicBrief | null>(discussion.brief ?? null);
+  const [aiQuestion, setAiQuestion] = useState("");
+  const [shareAnswer, setShareAnswer] = useState(false);
+  const [aiAnswers, setAiAnswers] = useState<Array<{ answer: string; sources?: string[]; by?: string; shared?: boolean }>>([]);
+  const [aiNotes, setAiNotes] = useState<Array<{ name: string; correction: string; speakerId: string }>>([]);
+  const [liveScores, setLiveScores] = useState<LiveScore[]>([]);
+  const [myLiveScore, setMyLiveScore] = useState<LiveScore | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState("");
   useEffect(() => { voiceRef.current = voice; }, [voice]);
   const [localSpeaking, setLocalSpeaking] = useState(false);
   const socketRef = useRef<Socket | null>(null);
@@ -225,9 +256,13 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
     }
     async function connectMedia() {
       const response = await fetch(`/api/discussions/${discussion.id}/token`, { method: "POST" });
-      const data = await response.json();
+      const data: { error?: string; token?: string; url?: string } = await response.json().catch(() => ({}));
       if (!response.ok) {
-        setEnded(data.error || "Video could not start.");
+        setEnded(data.error || `Video could not start (server returned ${response.status}).`);
+        return;
+      }
+      if (!data.token || !data.url) {
+        setEnded("Video could not start because the media server returned an invalid response.");
         return;
       }
       const room = new LiveKitRoom({ adaptiveStream: true, dynacast: true });
@@ -282,11 +317,27 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
 
     socket.on("connect", () => { setLinkState("Connected"); socket.emit("watch", { meetingId: discussion.meetingId, code }); });
     socket.on("room-error", (payload: { error: string }) => setEnded(payload.error));
-    socket.on("session-state", (payload: { status: string; startedAt: string | null }) => {
+    socket.on("session-state", (payload: { status: string; startedAt: string | null; ai?: boolean; brief?: TopicBrief | null }) => {
       setStatus(payload.status);
       setStartedAt(payload.startedAt);
+      setAiOn(Boolean(payload.ai));
+      setBrief(payload.brief ?? null);
       if (payload.status === "LIVE" || discussion.isHost) enterMedia();
     });
+    socket.on("ai-brief", (payload: TopicBrief) => setBrief(payload));
+    socket.on("ai-answer", (payload: { answer: string; sources?: string[]; by?: string; shared?: boolean }) => {
+      setAiAnswers((current) => [...current.slice(-4), payload]);
+      setAiBusy(false);
+    });
+    socket.on("ai-error", (payload: { error: string }) => {
+      setAiError(payload.error);
+      setAiBusy(false);
+    });
+    socket.on("ai-note", (payload: { name: string; correction: string; speakerId: string }) => {
+      setAiNotes((current) => [...current.slice(-3), payload]);
+    });
+    socket.on("live-scores", (payload: { scores: LiveScore[] }) => setLiveScores(payload.scores));
+    socket.on("my-live-score", (payload: { score: LiveScore }) => setMyLiveScore(payload.score));
     socket.on("session-live", (payload: { startedAt: string | null }) => {
       setStatus("LIVE");
       setStartedAt(payload.startedAt);
@@ -503,7 +554,8 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
       <div className="meet-body">
         <section className="meet-stage">
           {waiting && <div className="toast">The host has not started yet. You will enter automatically.</div>}
-          {prompts.slice(-1).map((prompt) => <div key={prompt.id} className="toast" aria-live="polite">{prompt.message} <span className="muted">({prompt.source === "model" ? "language model" : "moderator template"})</span></div>)}
+          {aiNotes.slice(-1).map((note) => <div key={`${note.speakerId}-${note.correction}`} className="toast" role="status">{discussion.isHost ? `Fact-check, ${note.name}: ${note.correction}` : `AI note on your point: ${note.correction}`}</div>)}
+          {prompts.slice(-1).map((prompt) => <div key={prompt.id} className="toast" aria-live="polite">{prompt.message} <span className="muted">({prompt.source === "gemini" || prompt.source === "model" ? "Gemini" : "moderator template"})</span></div>)}
           <div className="tile-grid">
             <Tile name={`${displayName} (you)`} stream={localRef.current} muted speaking={localSpeaking} audio={micOn} video={camOn} hand={hand} self />
             {peers.map((peer) => <Tile key={peer.socketId} name={roster.find((person) => person.userId === peer.userId)?.name || peer.name || "Participant"} stream={peer.stream} speaking={peer.speaking || roster.some((person) => person.userId === peer.userId && person.speaking)} audio={peer.audio} video={peer.video} hand={peer.hand} />)}
@@ -512,17 +564,23 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
         </section>
         <aside className="side">
           <div className="side-tabs" role="tablist">
-            {(["transcript", "people", "chat", ...(discussion.isHost ? ["monitor"] : [])] as const).map((tab) => (
-              <button key={tab} role="tab" aria-selected={panel === tab} onClick={() => setPanel(tab as "transcript" | "people" | "chat" | "monitor")}>{tab}</button>
+            {(["transcript", "people", "chat", ...(discussion.isHost ? ["monitor"] : []), ...(aiOn ? ["ai"] : [])] as const).map((tab) => (
+              <button key={tab} role="tab" aria-selected={panel === tab} onClick={() => setPanel(tab as "transcript" | "people" | "chat" | "monitor" | "ai")}>{tab}</button>
             ))}
           </div>
           <div className="side-body">
+            {!discussion.isHost && myLiveScore && <section className="toast" aria-live="polite">
+              <strong>Your running scores</strong>
+              <p>Knowledge {myLiveScore.knowledge} · Participation {myLiveScore.participation} · Thinking {myLiveScore.thinking}</p>
+            </section>}
             {panel === "transcript" && segments.map((segment) => (
               <article key={segment.id}>
                 <strong>{segment.name}</strong> <span className="muted">{new Date(segment.startedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
                 <span className={`pill ${segment.relevance === "IRRELEVANT" ? "bad" : segment.relevance === "PARTIALLY_RELEVANT" ? "warn" : segment.relevance === "PENDING" ? "neutral" : ""}`} style={{ marginLeft: 6 }}>{segment.relevance.replaceAll("_", " ").toLowerCase()}</span>
                 <p style={{ margin: "4px 0" }}>{segment.text}</p>
-                {segment.relevanceReason && <p className="muted" style={{ fontSize: 12 }}>{segment.relevanceReason} · {segment.analysisSource === "model" ? "language model" : segment.analysisSource === "lexical" ? "lexical model" : "analysing"}</p>}
+                {segment.accuracy && segment.accuracy !== "unverifiable" && <span className={`pill ${segment.accuracy === "inaccurate" ? "bad" : segment.accuracy === "partly_accurate" ? "warn" : ""}`}>{segment.accuracy.replaceAll("_", " ")}</span>}
+                {segment.concepts?.slice(0, 3).map((concept) => <span className="pill" key={concept}>{concept}</span>)}
+                {segment.relevanceReason && <p className="muted" style={{ fontSize: 12 }}>{segment.relevanceReason} · {segment.analysisSource === "gemini" ? "Gemini" : segment.analysisSource === "heuristic" || segment.analysisSource === "lexical" ? "heuristic" : "analysing"}</p>}
               </article>
             ))}
             {panel === "people" && roster.map((person) => (
@@ -554,10 +612,47 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
                     <div style={{ display: "flex", justifyContent: "space-between" }}><span>{person.name}</span><span>{formatClock(person.speakingMs)}</span></div>
                     <div className="meter"><span style={{ width: `${Math.min(100, person.speakingMs / 1000)}%` }} /></div>
                     <p className="muted">{person.relevant} relevant · {person.irrelevant} irrelevant · {person.missed} missed turns{person.technical ? ` · ${person.technical} technical notes` : ""}</p>
+                    {liveScores.filter((score) => score.userId === person.userId).map((score) => <p key={score.userId} className="muted">Know {score.knowledge} · Part {score.participation} · Think {score.thinking} · {score.source}</p>)}
                   </div>
                 ))}
                 {prompts.map((prompt) => <p key={prompt.id} className="muted">{prompt.message}</p>)}
               </>
+            )}
+            {panel === "ai" && aiOn && (
+              <div className="list">
+                <h3 className="serif">Topic primer</h3>
+                {brief?.status === "pending" && <p className="muted">Preparing the briefing…</p>}
+                {brief?.status === "failed" && <p className="muted">Gemini briefing unavailable.</p>}
+                {brief?.status === "ready" && (
+                  <>
+                    <p>{brief.summary}</p>
+                    <details>
+                      <summary>Key concepts and arguments</summary>
+                      {brief.key_concepts?.map((concept) => <p key={concept.term}><strong>{concept.term}</strong>: {concept.definition}</p>)}
+                      {brief.key_facts?.map((fact, index) => <p key={`fact-${index}`}>{fact}</p>)}
+                      {brief.arguments_for?.map((item, index) => <p key={`for-${index}`}>For: {item}</p>)}
+                      {brief.arguments_against?.map((item, index) => <p key={`against-${index}`}>Against: {item}</p>)}
+                      {discussion.isHost && brief.rubric?.map((item, index) => <p key={`rubric-${index}`}>Rubric: {item}</p>)}
+                    </details>
+                  </>
+                )}
+                <hr />
+                <h3 className="serif">Ask Gemini</h3>
+                <form onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!aiQuestion.trim() || aiBusy) return;
+                  setAiError("");
+                  setAiBusy(true);
+                  socketRef.current?.emit("ask-ai", { question: aiQuestion.trim(), share: shareAnswer });
+                  setAiQuestion("");
+                }}>
+                  <label className="field">Question<input value={aiQuestion} maxLength={500} onChange={(event) => setAiQuestion(event.target.value)} /></label>
+                  <label><input type="checkbox" checked={shareAnswer} onChange={(event) => setShareAnswer(event.target.checked)} /> Share with everyone</label>
+                  <button className="btn btn-primary" disabled={aiBusy || !aiQuestion.trim()}>{aiBusy ? "Thinking…" : "Ask"}</button>
+                </form>
+                {aiError && <p className="error">{aiError}</p>}
+                {aiAnswers.map((answer, index) => <article key={`${index}-${answer.answer}`}><strong>{answer.by || "Gemini"}</strong><p>{answer.answer}</p>{answer.sources?.map((source) => <p className="muted" key={source}>{source}</p>)}</article>)}
+              </div>
             )}
           </div>
         </aside>

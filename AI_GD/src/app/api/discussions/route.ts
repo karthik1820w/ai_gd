@@ -2,6 +2,8 @@ import { prisma } from "@/lib/db";
 import { fail, guardOrigin, json, readBody } from "@/lib/http";
 import { requireUser } from "@/lib/guard";
 import { discussionSchema } from "@/lib/validators";
+import { aiEnabled } from "@/server/ai";
+import { generateBrief } from "@/server/brief";
 import { newAccessCode, newMeetingId } from "@/server/ids";
 
 export async function POST(request: Request) {
@@ -25,6 +27,7 @@ export async function POST(request: Request) {
       title: parsed.data.title,
       topic: parsed.data.topic,
       description: parsed.data.description,
+      context: parsed.data.context,
       rules: parsed.data.rules,
       scheduledAt,
       durationMin: parsed.data.durationMin,
@@ -37,6 +40,7 @@ export async function POST(request: Request) {
       silencePromptSec: parsed.data.silencePromptSec,
       retentionDays: parsed.data.retentionDays ?? null,
       meetingId,
+      aiBrief: JSON.stringify({ status: aiEnabled() ? "pending" : "off" }),
       transcript: { create: {} },
       accessCodes: { create: { code: newAccessCode() } },
     },
@@ -52,5 +56,8 @@ export async function POST(request: Request) {
       href: `/host/sessions/${discussion.id}`,
     },
   });
+  if (aiEnabled()) {
+    void generateBrief(discussion.id).catch((error) => console.error("Background topic briefing failed.", error));
+  }
   return json({ id: discussion.id, meetingId: discussion.meetingId, code: discussion.accessCodes[0]?.code });
 }

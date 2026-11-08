@@ -82,6 +82,8 @@ model Discussion {
   title                 String
   topic                 String
   description           String
+  context               String           @default("")
+  aiBrief               String?
   rules                 String
   scheduledAt           DateTime
   durationMin           Int
@@ -180,6 +182,12 @@ model TranscriptSegment {
   relevance             Relevance              @default(PENDING)
   relevanceReason       String                 @default("")
   analysisSource        String                 @default("pending")
+  accuracy              String                 @default("unverifiable")
+  correction            String                 @default("")
+  understandingScore    Float?
+  originalityScore      Float?
+  concepts              String                 @default("[]")
+  gist                  String                 @default("")
   newPerspective        Boolean                @default(false)
   repeatsPrior          Boolean                @default(false)
   logicalArgument       Boolean                @default(false)
@@ -239,6 +247,11 @@ model Evaluation {
   adjustedById          String?
   adjustedAt            DateTime?
   formulaVersion        String                 @default("1")
+  knowledgePillar       Float?
+  participationPillar   Float?
+  thinkingPillar        Float?
+  source                String                 @default("heuristic")
+  model                 String?
   createdAt             DateTime               @default(now())
 
   discussion  Discussion             @relation(fields: [discussionId], references: [id], onDelete: Cascade)

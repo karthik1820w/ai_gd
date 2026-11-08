@@ -22,25 +22,34 @@ describe("hashed bag-of-words embedding", () => {
     assert.ok(Math.abs(cosine(topic, topic) - 1.0) < 1e-9);
   });
 
-  it("uses external embeddings endpoint when valid and falls back when broken", async () => {
+  it("uses Gemini embeddings when valid and falls back when broken", async () => {
     const mockVec = Array.from({ length: 256 }, (_, i) => (i === 7 ? 3 : 0));
     let mode = "good";
+    let requestUrl = "";
+    let requestInit: RequestInit | undefined;
 
-    const mockFetch = (async (_url: any, _init: any) => {
+    const mockFetch = (async (url: any, init: any) => {
+      requestUrl = String(url);
+      requestInit = init;
       if (mode === "good") {
         return {
           ok: true,
-          json: async () => ({ data: [{ embedding: mockVec }] }),
+          json: async () => ({ embedding: { values: mockVec } }),
         } as Response;
       }
       throw new Error("endpoint failed");
     }) as unknown as typeof fetch;
 
-    process.env.EMBEDDINGS_URL = "http://example.local/v1/embeddings";
+    const previousKey = process.env.GEMINI_API_KEY;
+    const previousAIEnabled = process.env.AI_ENABLED;
+    process.env.GEMINI_API_KEY = "test-key";
+    delete process.env.AI_ENABLED;
 
     try {
       const v = await embedAsync("hello world", mockFetch);
       assert.equal(v[7], 1); // Normalized (3 / 3 = 1)
+      assert.match(requestUrl, /gemini-embedding-001:embedContent$/);
+      assert.equal(new Headers(requestInit?.headers).get("x-goog-api-key"), "test-key");
 
       mode = "bad";
       const fallback = await embedAsync("hello world", mockFetch);
@@ -48,7 +57,10 @@ describe("hashed bag-of-words embedding", () => {
       assert.ok(Math.abs(Math.hypot(...fallback) - 1) < 1e-4);
       assert.notEqual(fallback[7], 1); // Local hash fallback
     } finally {
-      delete process.env.EMBEDDINGS_URL;
+      if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = previousKey;
+      if (previousAIEnabled === undefined) delete process.env.AI_ENABLED;
+      else process.env.AI_ENABLED = previousAIEnabled;
     }
   });
 });

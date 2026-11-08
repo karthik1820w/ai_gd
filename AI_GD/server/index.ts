@@ -91,7 +91,7 @@ server.listen(port, hostname, () => {
   console.log(`\nQuorum is running at ${protocol}://localhost:${port}`);
   for (const address of lanAddresses()) console.log(`On this network: ${protocol}://${address}:${port}`);
   if (!useHttps) console.log("Camera and microphone on a phone need HTTPS. Run npm run cert, then npm run dev:https.");
-  if (!process.env.AI_API_KEY) console.log("No AI_API_KEY set. Relevance uses the built-in lexical model until you add one.");
+  if (!process.env.GEMINI_API_KEY && !process.env.GEMINI_FLASH_API_KEY) console.log("No Gemini key set. AI features use the heuristic fallback until you add one.");
   console.log("");
 });
 }

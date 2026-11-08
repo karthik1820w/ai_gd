@@ -1,21 +1,156 @@
 import { NoteKind, ReportType } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { aiEnabled, complete, parseJson } from "@/server/ai";
+import { aiEnabled, aiModel, clearRoomAIBudget, complete, parseJson } from "@/server/ai";
+import { aliasPeople, aliasText, deAlias, EVALUATION_SCHEMA, taskPrompt, type Aliases } from "@/server/aiPrompts";
+import { aiWeights, scoreAIPillars } from "@/server/aiScoring";
+import { waitForPendingAnalysis } from "@/server/segments";
 import { dropRoom, snapshot } from "@/server/activity";
 import { finalizeJournal } from "@/server/journal";
 import { notify } from "@/server/notify";
 import { emitDiscussion } from "@/server/realtime";
-import { FORMULA_VERSION, WEIGHTS, buildFeedback, classifyStatement, scoreParticipant, type PriorLine, type RelevanceLabel } from "@/server/scoring";
+import { FORMULA_VERSION, buildFeedback, categoryFor, classifyStatement, scoreParticipant, type PriorLine, type RelevanceLabel } from "@/server/scoring";
 
-async function summarise(discussion: {
+type GeminiParticipantReview = {
+  knowledge: number;
+  thinking: number;
+  strengths: string[];
+  improvements: string[];
+  conceptsCovered: string[];
+  conceptsMissed: string[];
+  accuracyNotes: string[];
+  feedback: string;
+};
+
+type GeminiReview = {
+  participants: Map<string, GeminiParticipantReview>;
+  group: {
+    summary: string;
+    keyInsights: string[];
+    agreements: string[];
+    disagreements: string[];
+    missedTopics: string[];
+    quality: number;
+    bestContribution: { name: string; why: string } | null;
+  };
+  aliases: Aliases;
+};
+
+function boundedStrings(value: unknown, aliases: Aliases, limit = 5) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+        .map((item) => deAlias(item.trim().slice(0, 500), aliases))
+        .filter(Boolean)
+        .slice(0, limit)
+    : [];
+}
+
+async function geminiReview(discussion: {
   id: string;
+  hostId: string;
   topic: string;
   description: string;
+  context: string;
+  aiBrief: string | null;
+  participants: Array<{ id: string; userId: string; displayName: string; stat: { speakingMs: number; contributionCount: number } | null }>;
+  segments: Array<{
+    text: string;
+    relevance: string;
+    accuracy: string;
+    understandingScore: number | null;
+    reasoningScore: number | null;
+    originalityScore: number | null;
+    respondsToOthers: boolean;
+    participant: { userId: string };
+  }>;
+  missed: Array<{ participantId: string }>;
+}): Promise<GeminiReview | null> {
+  if (!aiEnabled()) return null;
+  const aliases = aliasPeople(discussion.participants.map((person) => ({ id: person.userId, name: person.displayName })));
+  const transcript = discussion.segments.slice(-160).map((segment) => {
+    const alias = aliases.byId.get(segment.participant.userId) || "speaker";
+    return `${alias}: ${aliasText(segment.text, aliases)} [acc:${segment.accuracy}; u:${segment.understandingScore == null ? "?" : Math.round(segment.understandingScore / 20)}; r:${segment.reasoningScore == null ? "?" : Math.round(segment.reasoningScore / 20)}]`;
+  }).join("\n");
+  const stats = discussion.participants
+    .filter((person) => person.userId !== discussion.hostId && aliases.byId.has(person.userId))
+    .map((person) => `${aliases.byId.get(person.userId)} turns=${person.stat?.contributionCount ?? 0}, speakingSeconds=${Math.round((person.stat?.speakingMs ?? 0) / 1000)}, missedInvites=${discussion.missed.filter((item) => item.participantId === person.id).length}`)
+    .join("\n");
+  const brief = (() => {
+    try {
+      const parsed = discussion.aiBrief ? JSON.parse(discussion.aiBrief) as Record<string, unknown> : {};
+      if (parsed.status !== "ready") return "";
+      return JSON.stringify({
+        summary: parsed.summary,
+        key_concepts: parsed.key_concepts,
+        key_facts: parsed.key_facts,
+        rubric: parsed.rubric,
+      }).slice(0, 4000);
+    } catch {
+      return "";
+    }
+  })();
+  try {
+    const raw = await complete(
+      taskPrompt("EVALUATION", "Evaluate each listed alias using only the supplied briefing, stats, and transcript. Return a JSON object matching the schema. For each alias return knowledge and thinking scores from 0 to 100, strengths, improvements, concepts_covered, concepts_missed, accuracy_notes, and feedback. Participation is calculated by code and must not be estimated. Anchors: 90+ exceptional, 75-89 strong, 60-74 adequate, 40-59 weak, below 40 poor. Cite only transcript-supported short quotes of at most 12 words. Do not invent contributions or feedback for silent participants; give them zero knowledge and thinking and empty lists. Provide group summary, key_insights, agreements, disagreements, missed_topics, quality, and best_contribution {alias,why}."),
+      `Topic: ${aliasText(discussion.topic, aliases)}\nDescription: ${aliasText(discussion.description, aliases)}\n<context>${aliasText(discussion.context, aliases)}</context>\n<briefing>${aliasText(brief, aliases)}</briefing>\n<participant_stats>\n${stats}\n</participant_stats>\n<transcript>\n${transcript}\n</transcript>`,
+      { tier: "final", responseSchema: EVALUATION_SCHEMA, roomId: discussion.id },
+    );
+    if (!raw) return null;
+    const parsed = parseJson(raw);
+    const result = new Map<string, GeminiParticipantReview>();
+    const people = Array.isArray(parsed.participants) ? parsed.participants : [];
+    for (const value of people) {
+      if (!value || typeof value !== "object") continue;
+      const person = value as Record<string, unknown>;
+      const alias = typeof person.alias === "string" ? person.alias : "";
+      if (!aliases.byAlias.has(alias)) continue;
+      result.set(alias, {
+        knowledge: clampScore(person.knowledge),
+        thinking: clampScore(person.thinking),
+        strengths: boundedStrings(person.strengths, aliases),
+        improvements: boundedStrings(person.improvements, aliases),
+        conceptsCovered: boundedStrings(person.concepts_covered, aliases),
+        conceptsMissed: boundedStrings(person.concepts_missed, aliases),
+        accuracyNotes: boundedStrings(person.accuracy_notes, aliases),
+        feedback: typeof person.feedback === "string" ? deAlias(person.feedback.slice(0, 1000), aliases) : "",
+      });
+    }
+    const group = parsed.group && typeof parsed.group === "object" ? parsed.group as Record<string, unknown> : {};
+    const best = group.best_contribution && typeof group.best_contribution === "object"
+      ? group.best_contribution as Record<string, unknown>
+      : null;
+    return {
+      participants: result,
+      aliases,
+      group: {
+        summary: typeof group.summary === "string" ? deAlias(group.summary.slice(0, 1200), aliases) : "",
+        keyInsights: boundedStrings(group.key_insights, aliases),
+        agreements: boundedStrings(group.agreements, aliases),
+        disagreements: boundedStrings(group.disagreements, aliases),
+        missedTopics: boundedStrings(group.missed_topics, aliases),
+        quality: clampScore(group.quality),
+        bestContribution: best && typeof best.alias === "string" && aliases.byAlias.has(best.alias)
+          ? { name: deAlias(best.alias, aliases), why: typeof best.why === "string" ? deAlias(best.why.slice(0, 500), aliases) : "" }
+          : null,
+      },
+    };
+  } catch (error) {
+    console.error("Gemini final evaluation failed; using heuristic scoring.", error);
+    return null;
+  }
+}
+
+function clampScore(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.min(100, Math.round(number))) : 0;
+}
+
+async function summarise(discussion: {
+  topic: string;
   segments: Array<{ text: string; relevance: string; participant: { displayName: string }; newPerspective: boolean }>;
-}) {
+}, group?: GeminiReview["group"]) {
   const usable = discussion.segments.filter((segment) => segment.relevance !== "IRRELEVANT" && segment.relevance !== "PENDING");
   const fallback = {
-    source: "extractive",
+    source: "heuristic",
     arguments: usable.slice(0, 5).map((segment) => `${segment.participant.displayName}: ${segment.text}`),
     ideas: discussion.segments.filter((segment) => segment.newPerspective).slice(0, 5).map((segment) => segment.text),
     perspectives: [...new Map(usable.map((segment) => [segment.participant.displayName, segment.text])).entries()].map(([name, text]) => `${name}: ${text}`),
@@ -24,33 +159,29 @@ async function summarise(discussion: {
     conclusion: usable.length
       ? `The group produced ${usable.length} on-topic contributions about ${discussion.topic}.`
       : `The captured discussion did not produce enough on-topic speech to summarise ${discussion.topic}.`,
+    bestContribution: null as { name: string; why: string } | null,
+    quality: null as number | null,
+    missedTopics: [] as string[],
   };
-  if (!aiEnabled() || discussion.segments.length === 0) return fallback;
-  try {
-    const transcript = discussion.segments.slice(-80).map((segment) => `${segment.participant.displayName}: ${segment.text}`).join("\n");
-    const raw = await complete(
-      "Summarise a group discussion using only the transcript. Do not invent remarks. Return JSON with arrays mainArguments, ideas, perspectives, agreements, disagreements, and a string conclusion. Each array has at most 5 short strings.",
-      `Topic: ${discussion.topic}\nDescription: ${discussion.description}\nTranscript:\n${transcript.slice(0, 12000)}`,
-    );
-    if (!raw) return fallback;
-    const parsed = parseJson(raw);
-    const list = (value: unknown, fallbackList: string[]) => (Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean).slice(0, 5) : fallbackList);
+  if (group && discussion.segments.length > 0) {
     return {
-      source: "model",
-      arguments: list(parsed.mainArguments, fallback.arguments),
-      ideas: list(parsed.ideas, fallback.ideas),
-      perspectives: list(parsed.perspectives, fallback.perspectives),
-      agreements: list(parsed.agreements, fallback.agreements),
-      disagreements: list(parsed.disagreements, fallback.disagreements),
-      conclusion: typeof parsed.conclusion === "string" && parsed.conclusion.trim() ? parsed.conclusion.trim() : fallback.conclusion,
+      source: "gemini",
+      arguments: group.keyInsights,
+      ideas: group.keyInsights,
+      perspectives: fallback.perspectives,
+      agreements: group.agreements,
+      disagreements: group.disagreements,
+      conclusion: group.summary || fallback.conclusion,
+      bestContribution: group.bestContribution,
+      quality: group.quality,
+      missedTopics: group.missedTopics,
     };
-  } catch (error) {
-    console.error("Summary model failed, using extractive summary.", error);
-    return fallback;
   }
+  return fallback;
 }
 
 export async function evaluateDiscussion(discussionId: string) {
+  await waitForPendingAnalysis(discussionId, 8_000);
   const discussion = await prisma.discussion.findUnique({
     where: { id: discussionId },
     include: {
@@ -110,6 +241,8 @@ export async function evaluateDiscussion(discussionId: string) {
     const duration = Math.max(0, segment.endedAt.getTime() - segment.startedAt.getTime());
     segmentSpeaking.set(segment.participantId, (segmentSpeaking.get(segment.participantId) ?? 0) + Math.min(duration, 60_000));
   }
+  const review = await geminiReview(discussion);
+  const configuredWeights = aiWeights();
 
   const previousAdjustments = await prisma.evaluation.findMany({ where: { discussionId } });
   const adjustments = new Map(previousAdjustments.map((item) => [item.participantId, item]));
@@ -158,7 +291,22 @@ export async function evaluateDiscussion(discussionId: string) {
       speechAvailable: participant.speechAvailable,
       blockingTechnical: technical.some((item) => item.kind === "MIC_DENIED" || item.kind === "SPEECH_UNSUPPORTED" || item.kind === "ICE_FAILED"),
     });
-    const feedback = buildFeedback({
+    const alias = review?.aliases.byId.get(participant.userId);
+    const examiner = alias ? review?.participants.get(alias) : undefined;
+    const pillars = scoreAIPillars({
+      contributions: own.map((segment) => ({
+        understanding: segment.understandingScore ?? segment.knowledgeScore,
+        reasoning: segment.reasoningScore,
+        originality: segment.originalityScore ?? (segment.newPerspective ? 70 : 50),
+        accuracy: segment.accuracy,
+        relevance: segment.relevance,
+        respondsToOthers: segment.respondsToOthers,
+      })),
+      participation: scored.participation,
+      examiner,
+      weights: configuredWeights.weights,
+    });
+    const heuristicFeedback = buildFeedback({
       topic: discussion.topic,
       score: scored,
       quotes: {
@@ -173,21 +321,27 @@ export async function evaluateDiscussion(discussionId: string) {
         mutedIgnored: missed.some((item) => item.reason === "MUTED") && scored.explanations.participation.includes("not penalised"),
       },
     });
+    const feedback = own.length && examiner
+      ? {
+          strengths: examiner.strengths,
+          improvements: examiner.improvements,
+          remark: examiner.feedback,
+        }
+      : own.length
+        ? { ...heuristicFeedback, remark: "" }
+        : { strengths: [], improvements: [], remark: "No contributions were recorded" };
     const kept = adjustments.get(participant.id);
     const parameters = [
-      ["topic_relevance", "Topic relevance", WEIGHTS.topicRelevance, scored.topicRelevance, scored.explanations.topicRelevance],
-      ["communication", "Communication and clarity", WEIGHTS.communication, scored.communication, scored.explanations.communication],
-      ["knowledge", "Knowledge and content quality", WEIGHTS.knowledge, scored.knowledge, scored.explanations.knowledge],
-      ["participation", "Participation and initiative", WEIGHTS.participation, scored.participation, scored.explanations.participation],
-      ["reasoning", "Logical reasoning", WEIGHTS.reasoning, scored.reasoning, scored.explanations.reasoning],
-      ["listening", "Listening and constructive engagement", WEIGHTS.listening, scored.listening, scored.explanations.listening],
+      ["knowledge", "Knowledge & understanding", configuredWeights.weights[0], pillars.knowledge, examiner ? "Gemini final evaluation blended with live per-contribution analysis." : "Computed from available transcript analysis; Gemini was unavailable."],
+      ["participation", "Participation", configuredWeights.weights[1], pillars.participation, scored.explanations.participation],
+      ["thinking", "Point of view & thinking", configuredWeights.weights[2], pillars.thinking, examiner ? "Gemini final evaluation blended with live reasoning and originality analysis." : "Computed from reasoning, originality, and responses in the transcript."],
     ] as const;
     await prisma.evaluation.create({
       data: {
         discussionId,
         participantId: participant.id,
-        overallScore: scored.overall,
-        category: scored.category,
+        overallScore: scored.incomplete ? null : pillars.overall,
+        category: categoryFor(scored.incomplete ? null : pillars.overall, scored.incomplete),
         participationPercent: scored.participationPercent,
         speakingMs,
         contributionCount: own.length,
@@ -205,6 +359,11 @@ export async function evaluateDiscussion(discussionId: string) {
         adjustedById: kept?.adjustedById,
         adjustedAt: kept?.adjustedAt,
         formulaVersion: FORMULA_VERSION,
+        knowledgePillar: pillars.knowledge,
+        participationPillar: pillars.participation,
+        thinkingPillar: pillars.thinking,
+        source: examiner ? "gemini" : "heuristic",
+        model: examiner ? aiModel("final") : null,
         parameters: {
           create: parameters.map(([key, label, weight, score, explanation]) => ({
             key,
@@ -218,7 +377,11 @@ export async function evaluateDiscussion(discussionId: string) {
           create: [
             ...feedback.strengths.map((body) => ({ kind: NoteKind.STRENGTH, body })),
             ...feedback.improvements.map((body) => ({ kind: NoteKind.IMPROVEMENT, body })),
+            { kind: NoteKind.REMARK, body: feedback.remark || (examiner ? `Evaluated by Gemini (${aiModel("final")}).` : "Gemini was unavailable; this evaluation uses heuristic scoring.") },
             { kind: NoteKind.REMARK, body: "Scores use each person's own microphone transcript. Appearance, accent, gender, and personality are not inputs." },
+            ...(examiner?.conceptsCovered.map((body) => ({ kind: NoteKind.REMARK, body: `Concept covered: ${body}` })) ?? []),
+            ...(examiner?.conceptsMissed.map((body) => ({ kind: NoteKind.REMARK, body: `Concept to explore: ${body}` })) ?? []),
+            ...(examiner?.accuracyNotes.map((body) => ({ kind: NoteKind.REMARK, body: `Accuracy note: ${body}` })) ?? []),
             ...own.filter((segment) => segment.relevance === "HIGHLY_RELEVANT" || segment.relevance === "RELEVANT").slice(0, 2).map((segment) => ({ kind: NoteKind.EVIDENCE, body: segment.text })),
           ],
         },
@@ -226,7 +389,7 @@ export async function evaluateDiscussion(discussionId: string) {
     });
   }
 
-  const summaryBody = await summarise(discussion);
+  const summaryBody = await summarise(discussion, review?.group);
   const relevanceAverage = discussion.segments.length
     ? discussion.segments.filter((segment) => segment.relevance === "HIGHLY_RELEVANT" || segment.relevance === "RELEVANT").length / discussion.segments.length
     : 0;
@@ -237,6 +400,9 @@ export async function evaluateDiscussion(discussionId: string) {
     ...summaryBody.perspectives.map((body, index) => ({ kind: "PERSPECTIVE", body, sortOrder: index })),
     ...summaryBody.agreements.map((body, index) => ({ kind: "AGREEMENT", body, sortOrder: index })),
     ...summaryBody.disagreements.map((body, index) => ({ kind: "DISAGREEMENT", body, sortOrder: index })),
+    ...summaryBody.missedTopics.map((body, index) => ({ kind: "MISSED_TOPIC", body, sortOrder: index })),
+    ...(summaryBody.bestContribution ? [{ kind: "BEST_CONTRIBUTION", body: `${summaryBody.bestContribution.name}: ${summaryBody.bestContribution.why}`, sortOrder: 0 }] : []),
+    ...(summaryBody.quality == null ? [] : [{ kind: "QUALITY", body: `Discussion quality: ${summaryBody.quality}/100`, sortOrder: 0 }]),
     { kind: "CONCLUSION", body: summaryBody.conclusion, sortOrder: 0 },
   ];
   await prisma.discussionSummary.create({
@@ -280,6 +446,7 @@ export async function evaluateDiscussion(discussionId: string) {
     body: `Reports for “${discussion.title}” are ready to review.`,
     href: `/host/sessions/${discussion.id}`,
   });
+  clearRoomAIBudget(discussionId);
   return summaryBody;
 }
 

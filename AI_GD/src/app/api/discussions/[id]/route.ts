@@ -2,6 +2,7 @@ import { unlink } from "fs/promises";
 import { prisma } from "@/lib/db";
 import { fail, json } from "@/lib/http";
 import { requireUser } from "@/lib/guard";
+import { readBrief } from "@/server/brief";
 
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   const { user, error } = await requireUser();
@@ -20,8 +21,12 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   if (discussion.hostId !== user.id && !member) return fail("You cannot view this discussion.", 403);
   if (discussion.hostId === user.id) return json(discussion);
   const own = discussion.participants.find((person) => person.userId === user.id);
+  const storedBrief = await readBrief(discussion.aiBrief);
+  const publicBrief = storedBrief ? { ...storedBrief, rubric: undefined, misconceptions: undefined } : null;
   return json({
     ...discussion,
+    aiBrief: publicBrief ? JSON.stringify(publicBrief) : null,
+    context: "",
     accessCodes: [],
     evaluations: discussion.evaluations.filter((item) => item.participantId === own?.id),
     participants: discussion.participants.map((person) => person.userId === user.id ? person : { ...person, stat: null, user: { name: person.user.name, email: "" } }),

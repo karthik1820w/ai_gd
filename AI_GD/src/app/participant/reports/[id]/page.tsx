@@ -28,6 +28,8 @@ export default async function ParticipantReport({ params }: { params: Promise<{ 
         <div className="card card-pad">
           <p className="serif" style={{ fontSize: 56, margin: 0 }}>{shown == null ? "—" : shown.toFixed(0)}</p>
           <p>{evaluation.adjustedScore != null ? "Host-adjusted score" : evaluation.category} · {evaluation.participationPercent}% of the group's speech · {formatClock(evaluation.speakingMs)} speaking · {evaluation.contributionCount} contributions</p>
+          <p className="muted">{evaluation.source === "gemini" ? `Evaluated by Gemini${evaluation.model ? ` (${evaluation.model})` : ""}` : "Evaluated with the heuristic fallback."}</p>
+          <p className="muted">Weights: {evaluation.parameters.map((parameter) => `${parameter.label} ${Math.round(parameter.weight * 100)}%`).join(" · ")}</p>
           {evaluation.incompleteReason && <p>{evaluation.incompleteReason}</p>}
           {evaluation.adjustedScore != null && <p>Original score {evaluation.overallScore ?? "—"}. Host note: {evaluation.adjustmentReason}</p>}
           <ScoreChart rows={evaluation.parameters.map((parameter) => ({ name: parameter.label, score: parameter.score ?? 0 }))} />
@@ -38,6 +40,7 @@ export default async function ParticipantReport({ params }: { params: Promise<{ 
           {evaluation.notes.map((note) => <p key={note.id}><strong>{note.kind.toLowerCase()}: </strong>{note.body}</p>)}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <a className="btn btn-primary" href={`/api/discussions/${id}/pdf?type=INDIVIDUAL&download=1`}>Download PDF</a>
+            <a className="btn btn-ghost" href={`/api/discussions/${id}/feedback`}>Download my feedback (.txt)</a>
             <a className="btn btn-ghost" href={`/api/discussions/${id}/pdf?type=INDIVIDUAL`}>Preview PDF</a>
             <a className="btn btn-ghost" href={`/api/discussions/${id}/pdf?type=TRANSCRIPT`}>Shared transcript</a>
           </div>

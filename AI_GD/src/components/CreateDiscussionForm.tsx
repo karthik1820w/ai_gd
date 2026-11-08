@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 
 const STANDARD_RULES = "Let the current speaker finish during a moderated turn. Disagree with the point, not the person. Stay on the announced topic. Support claims with an example when you can. Evaluation uses the transcript only — not appearance, accent, or personality.";
 
@@ -10,6 +10,10 @@ export function CreateDiscussionForm() {
   const [error, setError] = useState("");
   const [rules, setRules] = useState(STANDARD_RULES);
   const [pending, setPending] = useState(false);
+  const [aiOn, setAiOn] = useState(false);
+  useEffect(() => {
+    void fetch("/api/config").then((response) => response.json()).then((data: { ai?: boolean }) => setAiOn(Boolean(data.ai))).catch(() => setAiOn(false));
+  }, []);
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setPending(true);
@@ -20,6 +24,7 @@ export function CreateDiscussionForm() {
       title: form.get("title"),
       topic: form.get("topic"),
       description: form.get("description"),
+      context: form.get("context"),
       rules,
       date: form.get("date"),
       time: form.get("time"),
@@ -48,6 +53,7 @@ export function CreateDiscussionForm() {
       <label className="field">GD title<input name="title" required minLength={3} placeholder="Morning admissions round" /></label>
       <label className="field">Discussion topic<input name="topic" required minLength={3} placeholder="Impact of artificial intelligence on education" /></label>
       <label className="field">Topic description<textarea name="description" required minLength={10} rows={4} placeholder="What should the group examine?" /></label>
+      {aiOn && <label className="field">Background or scope for the AI (optional)<textarea name="context" maxLength={2000} rows={3} placeholder="Add context that should constrain the briefing and analysis." /></label>}
       <label className="field">Discussion rules<textarea value={rules} onChange={(event) => setRules(event.target.value)} required minLength={10} rows={4} /></label>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <label className="field">Date<input name="date" type="date" required defaultValue={new Date().toISOString().slice(0, 10)} /></label>
@@ -66,7 +72,8 @@ export function CreateDiscussionForm() {
       <label><input type="checkbox" name="transcriptionEnabled" defaultChecked /> Record a transcript and score it</label>
       <label><input type="checkbox" name="recordingEnabled" /> Save each participant's microphone audio</label>
       <label className="field">Delete transcript after (days, optional)<input name="retentionDays" type="number" min={1} placeholder="Leave blank to keep until you delete the session" /></label>
-      <p className="muted">Video is forwarded through the local media server, so a room can hold up to 40 people. Relevance uses a language model when AI_API_KEY is set, and the built-in lexical model otherwise. The transcript says which one ran.</p>
+      {aiOn && <p className="muted">AI is enabled. Transcripts and the topic context may be sent to Google Gemini for analysis and evaluation.</p>}
+      <p className="muted">Video is forwarded through the local media server, so a room can hold up to 40 people. Gemini analysis uses the configured Gemini key; otherwise the built-in lexical model is used.</p>
       {error && <p className="error">{error}</p>}
       <button className="btn btn-primary" disabled={pending}>{pending ? "Creating…" : "Create discussion"}</button>
     </form>

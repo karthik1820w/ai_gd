@@ -114,6 +114,13 @@ function drawIndividual(doc: Doc, discussion: ReportDiscussion, evaluation: Repo
   }
   doc.font("Helvetica").fontSize(11).fillColor(INK).text(`Speaking time ${Math.round(evaluation.speakingMs / 1000)}s   ·   ${evaluation.contributionCount} contributions   ·   ${evaluation.participationPercent}% of group speech`, 48, y, { width: 500 });
   y += 28;
+  doc.font("Helvetica").fontSize(9).fillColor(MUTED).text(
+    `${evaluation.source === "gemini" ? `Evaluated by Gemini${evaluation.model ? ` (${evaluation.model})` : ""}` : "Heuristic fallback"}  ·  Weights: ${evaluation.parameters.map((item) => `${item.label} ${Math.round(item.weight * 100)}%`).join(", ")}`,
+    48,
+    y,
+    { width: 500 },
+  );
+  y = doc.y + 12;
   doc.font("Helvetica-Bold").fontSize(13).text("Detailed evaluation", 48, y);
   y += 22;
   for (const parameter of evaluation.parameters) y = bar(doc, `${parameter.label} (${Math.round(parameter.weight * 100)}%)`, parameter.score, y);
@@ -214,6 +221,8 @@ type ReportDiscussion = {
     participationPercent: number;
     incompleteReason: string | null;
     adjustmentReason: string | null;
+    source: string;
+    model: string | null;
     participant: { displayName: string };
     parameters: Array<{ label: string; weight: number; score: number | null }>;
     notes: Array<{ kind: string; body: string }>;

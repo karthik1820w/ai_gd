@@ -1,5 +1,7 @@
 node_modules
 bin/
+models/
+dump.rdb
 .next
 data/*.db
 data/*.db-journal

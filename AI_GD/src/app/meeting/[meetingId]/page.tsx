@@ -2,6 +2,8 @@ import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { readSession } from "@/lib/auth";
 import { MeetingApp } from "@/components/MeetingApp";
+import { aiEnabled } from "@/server/ai";
+import { readBrief } from "@/server/brief";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +21,8 @@ export default async function MeetingPage({ params, searchParams }: { params: Pr
   if (!isHost && !membership && !(code && active && safeEqual(code, active))) {
     return <main className="content"><h1 className="serif">This meeting link or access code is not valid.</h1></main>;
   }
+  const fullBrief = await readBrief(discussion.aiBrief);
+  const brief = fullBrief && isHost ? fullBrief : fullBrief && { ...fullBrief, rubric: undefined, misconceptions: undefined };
   return (
     <MeetingApp
       code={code}
@@ -37,6 +41,8 @@ export default async function MeetingPage({ params, searchParams }: { params: Pr
         moderatorEnabled: discussion.moderatorEnabled,
         transcriptionEnabled: discussion.transcriptionEnabled,
         recordingEnabled: discussion.recordingEnabled,
+        aiEnabled: aiEnabled(),
+        brief,
         isHost,
         displayName: membership?.displayName || user.name,
       }}

@@ -1,11 +1,7 @@
-// 256-dimensional signed feature hashing vectorizer (dependency-free)
-// with cosine similarity and optional external embedding model endpoint.
-
+// 256-dimensional signed feature hashing vectorizer (dependency-free).
 const D = 256;
 const STOP = new Set(
-  "the and for are was but not you with this that have has from they will would there their what about which when your can its into than them then these those been were a an in of to on is at by".split(
-    " ",
-  ),
+  "the and for are was but not you with this that have has from they will would there their what about which when your can its into than them then these those been were a an in of to on is at by".split(" "),
 );
 
 /**
@@ -15,75 +11,56 @@ const STOP = new Set(
 export function embed(text: string): number[] {
   const v = new Array(D).fill(0);
   const words = String(text).toLowerCase().match(/[a-z0-9]+/g) || [];
-
-  for (const w of words) {
-    if (w.length < 3 || STOP.has(w)) continue;
-    let h = 2166136261;
-    for (let i = 0; i < w.length; i++) {
-      h ^= w.charCodeAt(i);
-      h = Math.imul(h, 16777619);
+  for (const word of words) {
+    if (word.length < 3 || STOP.has(word)) continue;
+    let hash = 2166136261;
+    for (let index = 0; index < word.length; index += 1) {
+      hash ^= word.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
     }
-    v[(h >>> 0) % D] += (h >>> 16) & 1 ? 1 : -1;
+    v[(hash >>> 0) % D] += (hash >>> 16) & 1 ? 1 : -1;
   }
-
   const norm = Math.hypot(...v) || 1;
-  return v.map((x) => x / norm);
+  return v.map((value) => value / norm);
 }
 
-/**
- * Cosine similarity between two L2-normalized vectors.
- */
+/** Cosine similarity between two L2-normalized vectors. */
 export function cosine(a: number[], b: number[]): number {
   if (a.length !== b.length) return 0;
-  return a.reduce((sum, val, idx) => sum + val * b[idx], 0);
+  return a.reduce((sum, value, index) => sum + value * b[index], 0);
 }
 
-/**
- * Asynchronous embedding: attempts to query an external OpenAI-compatible
- * embeddings endpoint if EMBEDDINGS_URL is set, falling back seamlessly
- * to the internal hashed embedding.
- */
+/** Use Gemini embeddings when configured and fall back to local feature hashing. */
 export async function embedAsync(text: string, fetchFn = fetch): Promise<number[]> {
-  const url = process.env.EMBEDDINGS_URL;
-  if (!url) return embed(text);
-
+  const key = process.env.GEMINI_API_KEY || process.env.GEMINI_FLASH_API_KEY;
+  if (!key || process.env.AI_ENABLED?.toLowerCase() === "off") return embed(text);
   try {
-    const res = await fetchFn(url, {
+    const base = (process.env.GEMINI_BASE_URL || "https://generativelanguage.googleapis.com").replace(/\/+$/, "");
+    const response = await fetchFn(`${base}/v1beta/models/gemini-embedding-001:embedContent`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(process.env.EMBEDDINGS_KEY ? { authorization: `Bearer ${process.env.EMBEDDINGS_KEY}` } : {}),
-      },
-      body: JSON.stringify({
-        model: process.env.EMBEDDINGS_MODEL || "text-embedding-3-small",
-        input: text,
-        dimensions: D,
-      }),
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify({ content: { parts: [{ text }] }, outputDimensionality: D }),
       signal: AbortSignal.timeout(4000),
     });
-
-    if (res.ok) {
-      const data = await res.json();
-      const v = data?.data?.[0]?.embedding;
-      if (Array.isArray(v) && v.length === D) {
-        const norm = Math.hypot(...v) || 1;
-        return v.map((x) => x / norm);
+    if (response.ok) {
+      const data = await response.json() as { embedding?: { values?: unknown } };
+      const vector = data.embedding?.values;
+      if (Array.isArray(vector) && vector.length === D && vector.every((value) => typeof value === "number" && Number.isFinite(value))) {
+        const values = vector as number[];
+        const norm = Math.hypot(...values) || 1;
+        return values.map((value) => value / norm);
       }
     }
   } catch {
-    // Fall back to local hash embedding
+    // Local feature hashing is the intentional offline fallback.
   }
-
   return embed(text);
 }
 
-/**
- * Computes semantic similarity (0 to 100) between an utterance and the discussion topic.
- */
+/** Computes semantic similarity (0 to 100) between text and the discussion topic. */
 export async function semanticRelevance(text: string, topicText: string): Promise<number> {
-  const [vecText, vecTopic] = await Promise.all([embedAsync(text), embedAsync(topicText)]);
-  const sim = cosine(vecText, vecTopic);
-  // Map [-0.2, 0.8] range to [0, 100]
-  const scaled = ((sim + 0.1) / 0.9) * 100;
+  const [textVector, topicVector] = await Promise.all([embedAsync(text), embedAsync(topicText)]);
+  const similarity = cosine(textVector, topicVector);
+  const scaled = ((similarity + 0.1) / 0.9) * 100;
   return Math.max(0, Math.min(100, Math.round(scaled)));
 }
