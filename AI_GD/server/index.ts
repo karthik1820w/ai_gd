@@ -1,9 +1,7 @@
 import "dotenv/config";
-import { spawn } from "child_process";
 import { createServer as createHttp } from "http";
 import { createServer as createHttps } from "https";
 import { existsSync, readFileSync } from "fs";
-import path from "path";
 import { networkInterfaces } from "os";
 import { parse } from "url";
 import next from "next";
@@ -12,6 +10,8 @@ import { enableWal } from "../src/lib/db";
 import { startLoops } from "../src/server/loops";
 import { setIO } from "../src/server/realtime";
 import { attachSignaling } from "../src/server/signaling";
+import { resolveClientAddress } from "../src/server/clientAddress";
+import { startMediaServer, stopMediaServer } from "../src/server/media";
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = "0.0.0.0";
@@ -20,6 +20,24 @@ const useHttps = process.argv.includes("--https") || process.env.USE_HTTPS === "
 
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
+
+function sanitizeForwardingHeaders(req: import("http").IncomingMessage) {
+  const trustProxy = process.env.TRUST_PROXY === "1";
+  const address = resolveClientAddress(
+    req.socket.remoteAddress,
+    {
+      forwardedFor: req.headers["x-forwarded-for"],
+      realIp: req.headers["x-real-ip"],
+    },
+    trustProxy,
+  );
+  req.headers["x-real-ip"] = address;
+  if (!trustProxy) {
+    delete req.headers["x-forwarded-for"];
+    delete req.headers["x-forwarded-host"];
+    delete req.headers["x-forwarded-proto"];
+  }
+}
 
 function lanAddresses() {
   const virtualName = /virtual|hyper-v|vethernet|wsl|docker|vmware|vbox|bluetooth|npcap|\btap\b|tun|loopback/i;
@@ -40,32 +58,17 @@ if (useHttps && (!existsSync("certs/key.pem") || !existsSync("certs/cert.pem")))
   process.exit(1);
 }
 
-function startMediaServer() {
-  const binary = path.join(process.cwd(), "bin", "livekit-server.exe");
-  if (!existsSync(binary)) {
-    console.error("Media server binary is missing. Expected bin/livekit-server.exe.");
-    return;
-  }
-  const apiKey = process.env.LIVEKIT_API_KEY || "devkey";
-  const apiSecret = process.env.LIVEKIT_API_SECRET || "";
-  if (!apiSecret) {
-    console.error("LIVEKIT_API_SECRET is empty, so video rooms cannot start.");
-    return;
-  }
-  const nodeIp = process.env.LIVEKIT_NODE_IP || lanAddresses()[0] || "127.0.0.1";
-  const child = spawn(binary, ["--dev", "--bind", "0.0.0.0", "--node-ip", nodeIp, "--keys", `${apiKey}: ${apiSecret}`], {
-    stdio: "inherit",
-    windowsHide: true,
-  });
-  child.on("error", (error) => console.error("Media server failed to start.", error));
-  process.on("exit", () => child.kill());
-  console.log("Media server starting on port 7880.");
-}
-
 async function main() {
-startMediaServer();
+const missing = [];
+if (!process.env.DATABASE_URL) missing.push("DATABASE_URL");
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 16 || process.env.JWT_SECRET.startsWith("replace-with-")) missing.push("JWT_SECRET (at least 16 characters)");
+if (missing.length) {
+  throw new Error(`Missing required configuration: ${missing.join(", ")}. Copy .env.example to .env and run npm run setup.`);
+}
+process.env.LIVEKIT_NODE_IP ||= lanAddresses()[0] || "127.0.0.1";
+await startMediaServer();
 await app.prepare();
-await enableWal().catch(() => undefined);
+await enableWal().catch((error) => console.error("Could not enable SQLite WAL mode.", error));
 
 const server = useHttps
   ? createHttps(
@@ -74,10 +77,13 @@ const server = useHttps
         cert: readFileSync("certs/cert.pem"),
       },
       (req, res) => {
+        sanitizeForwardingHeaders(req);
+        req.headers["x-forwarded-proto"] = "https";
         handle(req, res, parse(req.url || "/", true));
       },
     )
   : createHttp((req, res) => {
+      sanitizeForwardingHeaders(req);
       handle(req, res, parse(req.url || "/", true));
     });
 
@@ -98,5 +104,16 @@ server.listen(port, hostname, () => {
 
 main().catch((error) => {
   console.error(error);
-  process.exit(1);
+  void stopMediaServer().finally(() => process.exit(1));
 });
+
+let shuttingDown = false;
+function shutdown(code: number, error?: unknown) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (error) console.error("Server is shutting down after an unexpected error.", error);
+  void stopMediaServer().finally(() => process.exit(code));
+}
+process.once("SIGINT", () => shutdown(130));
+process.once("SIGTERM", () => shutdown(143));
+process.once("uncaughtException", (error) => shutdown(1, error));

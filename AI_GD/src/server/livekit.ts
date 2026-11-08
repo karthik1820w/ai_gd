@@ -1,4 +1,4 @@
-import { AccessToken, RoomServiceClient, TrackSource, TrackType } from "livekit-server-sdk";
+import { AccessToken, RoomServiceClient, TrackType } from "livekit-server-sdk";
 
 function key() {
   return process.env.LIVEKIT_API_KEY || "devkey";
@@ -36,25 +36,6 @@ export async function createRoomToken(input: { room: string; identity: string; n
 
 function client() {
   return new RoomServiceClient(livekitHttp(), key(), secret());
-}
-
-/**
- * Server-enforced mic permission: dynamically grants or revokes permission
- * for a participant to publish microphone audio tracks on the SFU.
- */
-export async function allowMic(room: string, identity: string, on: boolean): Promise<boolean> {
-  if (!secret()) return false;
-  try {
-    const svc = client();
-    await svc.updateParticipant(room, identity, undefined, {
-      canPublish: true,
-      canSubscribe: true,
-      canPublishSources: on ? [TrackSource.CAMERA, TrackSource.MICROPHONE] : [TrackSource.CAMERA],
-    });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export async function muteLivekitAudio(room: string, identity: string, muted: boolean) {

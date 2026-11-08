@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { SignJWT, jwtVerify } from "jose";
 import { prisma } from "@/lib/db";
+import { secureCookie } from "@/lib/securityConfig";
 
 export const COOKIE = "quorum_token";
 
@@ -27,11 +28,11 @@ export async function signSession(user: SessionUser) {
     .sign(secret());
 }
 
-export function cookieOptions() {
+export function cookieOptions(request?: Request) {
   return {
     httpOnly: true,
     sameSite: "lax" as const,
-    secure: process.env.NODE_ENV === "production",
+    secure: secureCookie(request, process.env.COOKIE_SECURE, process.env.NODE_ENV === "production"),
     path: "/",
     maxAge: 60 * 60 * 24 * 7,
   };

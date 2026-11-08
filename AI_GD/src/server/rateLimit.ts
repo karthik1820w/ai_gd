@@ -22,6 +22,13 @@ export function createBucket(rate = 40, burst = 80): TokenBucket {
   };
 }
 
+export function createRealtimeBuckets() {
+  return {
+    speaking: createBucket(2, 4),
+    transcript: createBucket(10, 30),
+  };
+}
+
 /**
  * Attempts to take `cost` tokens from the bucket.
  * Returns true if allowed, false if rate limited.
@@ -38,4 +45,3 @@ export function take(bucket: TokenBucket, cost = 1): boolean {
   bucket.tokens -= cost;
   return true;
 }
-

@@ -1,9 +1,11 @@
 import { json } from "@/lib/http";
 import { aiEnabled } from "@/server/ai";
+import { getMediaStatus } from "@/server/media";
 
 export async function GET() {
+  const media = await getMediaStatus();
   return json({
     ai: aiEnabled(),
-    media: Boolean(process.env.LIVEKIT_API_SECRET),
+    media: media.ready,
   });
 }

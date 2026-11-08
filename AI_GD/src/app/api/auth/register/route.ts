@@ -18,6 +18,6 @@ export async function POST(request: Request) {
   });
   const token = await signSession(user);
   const jar = await cookies();
-  jar.set("quorum_token", token, cookieOptions());
+  jar.set("quorum_token", token, cookieOptions(request));
   return json({ id: user.id, name: user.name, role: user.role, next: user.role === "HOST" ? "/host" : "/participant" });
 }

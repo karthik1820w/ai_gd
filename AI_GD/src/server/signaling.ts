@@ -11,13 +11,13 @@ import {
   setSpeaking,
 } from "@/server/activity";
 import { endDiscussion } from "@/server/evaluate";
-import { allowMic, muteLivekitAudio, removeLivekitParticipant } from "@/server/livekit";
+import { muteLivekitAudio, removeLivekitParticipant } from "@/server/livekit";
 import { startDiscussion } from "@/server/live";
 import { publishRoster } from "@/server/moderator";
 import { emitDiscussion } from "@/server/realtime";
 import { addSegment, publishLiveScores, segmentDTO } from "@/server/segments";
 import { tokenFromCookie, verifyToken, type TokenUser } from "@/server/token";
-import { createBucket, take } from "@/server/rateLimit";
+import { createBucket, createRealtimeBuckets, take } from "@/server/rateLimit";
 import { NOTICE } from "@/server/netQuality";
 import { logEvent } from "@/server/journal";
 import { aiEnabled, complete, parseJson } from "@/server/ai";
@@ -45,6 +45,7 @@ export function attachSignaling(io: Server) {
 
   io.on("connection", (socket) => {
     socket.join(`user:${socket.data.user.id}`);
+    const realtimeBuckets = createRealtimeBuckets();
 
     // Rate limit helper
     const allowEvent = (cost = 1) => {
@@ -191,22 +192,19 @@ export function attachSignaling(io: Server) {
     });
 
     socket.on("speaking", async (payload: { speaking?: boolean }) => {
-      if (!allowEvent(1)) return;
+      if (!take(realtimeBuckets.speaking)) return;
       const discussionId = socket.data.discussionId;
       if (!discussionId) return;
       const speaking = Boolean(payload?.speaking);
-      setSpeaking(discussionId, socket.data.user.id, speaking);
+      const userId = socket.data.user.id;
+      if (room(discussionId).speaking.has(userId) === speaking) return;
+      setSpeaking(discussionId, userId, speaking);
+      if (speaking && !room(discussionId).speaking.has(userId)) return;
 
-      logEvent(discussionId, "speaking", { userId: socket.data.user.id, speaking });
+      logEvent(discussionId, "speaking", { userId, speaking });
 
-      // Synchronize floor mic permission with LiveKit if discussion is active
-      const discussion = await prisma.discussion.findUnique({ where: { id: discussionId }, select: { meetingId: true, mode: true } });
-      if (discussion?.meetingId && discussion.mode === "AI_MODERATED") {
-        allowMic(discussion.meetingId, socket.data.user.id, speaking).catch(() => undefined);
-      }
-
-      if (speaking && acceptSpeakingTick(discussionId, socket.data.user.id)) {
-        const participant = await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId, userId: socket.data.user.id } } });
+      if (speaking && acceptSpeakingTick(discussionId, userId)) {
+        const participant = await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId, userId } } });
         if (participant) {
           await prisma.speakingStat.upsert({
             where: { participantId: participant.id },
@@ -215,11 +213,14 @@ export function attachSignaling(io: Server) {
           });
         }
       }
-      emitDiscussion(discussionId, "speaking", { userId: socket.data.user.id, speaking });
+      emitDiscussion(discussionId, "speaking", { userId, speaking });
     });
 
     socket.on("transcript", async (payload: { text?: string; startedAt?: string; endedAt?: string }) => {
-      if (!allowEvent(1)) return;
+      if (!take(realtimeBuckets.transcript)) {
+        socket.emit("room-error", { error: "Transcript rate limit reached. Please pause briefly and try again." });
+        return;
+      }
       if (!socket.data.discussionId || !payload?.text) return;
       logEvent(socket.data.discussionId, "speech", { userId: socket.data.user.id, text: payload.text });
       await addSegment({ discussionId: socket.data.discussionId, userId: socket.data.user.id, text: payload.text, startedAt: payload.startedAt, endedAt: payload.endedAt });
@@ -348,7 +349,6 @@ export function attachSignaling(io: Server) {
         data: { micLocked: Boolean(payload.locked) },
       });
       await muteLivekitAudio(discussion.meetingId, payload.userId, Boolean(payload.locked)).catch((error) => console.error("Could not mute the media track.", error));
-      await allowMic(discussion.meetingId, payload.userId, !payload.locked).catch(() => undefined);
       const presence = room(discussion.id).presence.get(payload.userId);
       if (presence) io.to(presence.socketId).emit("force-mute", { locked: Boolean(payload.locked) });
       logEvent(discussion.id, "host-mute", { targetUserId: payload.userId, locked: Boolean(payload.locked) });

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-
-const hits = new Map<string, number[]>();
+import { loginRateLimitKeys } from "@/server/clientAddress";
+import { rateLimit } from "@/server/httpRateLimit";
 
 export function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status });
@@ -19,21 +19,14 @@ export async function readBody(request: Request) {
 }
 
 export function clientKey(request: Request) {
-  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded || request.headers.get("x-real-ip") || "local";
+  return request.headers.get("x-real-ip")?.trim()
+    || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+    || "unknown";
 }
 
-export function rateLimit(key: string, limit: number, windowMs: number) {
-  const now = Date.now();
-  const recent = (hits.get(key) ?? []).filter((stamp) => now - stamp < windowMs);
-  if (recent.length >= limit) {
-    hits.set(key, recent);
-    return false;
-  }
-  recent.push(now);
-  hits.set(key, recent);
-  return true;
-}
+export { loginRateLimitKeys };
+
+export { rateLimit };
 
 export function sameOrigin(request: Request) {
   const origin = request.headers.get("origin");

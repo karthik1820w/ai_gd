@@ -5,6 +5,7 @@ import { Room as LiveKitRoom, RoomEvent, Track } from "livekit-client";
 import { io, Socket } from "socket.io-client";
 import { Captions, Hand, MessageSquare, Mic, MicOff, MonitorUp, PhoneOff, Settings, Users, Video, VideoOff } from "lucide-react";
 import { formatClock } from "@/lib/format";
+import { createSpeakingDetector } from "@/lib/speakingDetector";
 
 type DiscussionInfo = {
   id: string;
@@ -31,6 +32,7 @@ type Peer = { socketId: string; userId: string; name: string; stream: MediaStrea
 type RosterEntry = { userId: string; name: string; isHost: boolean; connected: boolean; audio: boolean; video: boolean; hand: boolean; speaking: boolean; micLocked: boolean; speakingMs: number; contributions: number; relevant: number; irrelevant: number; missed: number; technical: number; q?: "good" | "fair" | "poor" | string };
 type TopicBrief = { status: "pending" | "ready" | "failed" | "off"; source?: string; model?: string; summary?: string; key_concepts?: Array<{ term: string; definition: string }>; key_facts?: string[]; arguments_for?: string[]; arguments_against?: string[]; rubric?: string[] };
 type LiveScore = { participantId: string; userId: string; name: string; knowledge: number; participation: number; thinking: number; overall: number; source: string };
+type MediaHealth = { ready: boolean; error: string | null };
 
 export function MeetingApp({ discussion, user, code }: { discussion: DiscussionInfo; user: { id: string; name: string; speechLang: string }; code?: string }) {
   const [stage, setStage] = useState<"lobby" | "room">("lobby");
@@ -46,6 +48,7 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
   const [videoId, setVideoId] = useState("");
   const [aiOn, setAiOn] = useState(Boolean(discussion.aiEnabled));
   const [brief] = useState<TopicBrief | null>(discussion.brief ?? null);
+  const [mediaHealth, setMediaHealth] = useState<MediaHealth>({ ready: false, error: "Checking media server status…" });
   const previewRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -92,6 +95,22 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
       .catch(() => { if (active) setAiOn(false); });
     return () => { active = false; };
   }, []);
+  useEffect(() => {
+    let active = true;
+    const check = () => {
+      void fetch("/api/media-status")
+        .then(async (response) => {
+          const result = await response.json() as { ready?: boolean; error?: string | null };
+          if (active) setMediaHealth({ ready: response.ok && Boolean(result.ready), error: result.error ?? null });
+        })
+        .catch(() => {
+          if (active) setMediaHealth({ ready: false, error: "Could not check the media server. Check the server logs and try again." });
+        });
+    };
+    check();
+    const timer = window.setInterval(check, 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
 
   function togglePreview(kind: "audio" | "video", on: boolean) {
     streamRef.current?.getTracks().filter((track) => track.kind === kind).forEach((track) => { track.enabled = on; });
@@ -125,6 +144,10 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
         <p className="pill">{discussion.mode === "AI_MODERATED" ? "AI-moderated" : "Free-flow"}</p>
         <h1 className="serif" style={{ fontSize: 40, marginBottom: 4 }}>{discussion.title}</h1>
         <p className="muted">Topic: {discussion.topic}</p>
+        {!mediaHealth.ready && <section className="media-down" role="alert">
+          <strong>Video and audio are unavailable</strong>
+          <p>{mediaHealth.error || "Start LiveKit or check its configuration before joining."}</p>
+        </section>}
         {aiOn && <section className="card card-pad" style={{ marginBottom: 16 }}>
           <h2 className="serif">Topic primer</h2>
           {brief?.status === "pending" && <p className="muted">Preparing the briefing…</p>}
@@ -167,10 +190,10 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
     );
   }
 
-  return <Room discussion={discussion} user={user} code={code} displayName={displayName} initialStream={streamRef.current} initialMic={micOn} initialCam={camOn} record={discussion.recordingEnabled && consentR} />;
+  return <Room discussion={discussion} user={user} code={code} displayName={displayName} initialStream={streamRef.current} initialMic={micOn} initialCam={camOn} record={discussion.recordingEnabled && consentR} mediaHealth={mediaHealth} />;
 }
 
-function Room({ discussion, user, code, displayName, initialStream, initialMic, initialCam, record }: { discussion: DiscussionInfo; user: { id: string; speechLang: string }; code?: string; displayName: string; initialStream: MediaStream | null; initialMic: boolean; initialCam: boolean; record: boolean }) {
+function Room({ discussion, user, code, displayName, initialStream, initialMic, initialCam, record, mediaHealth }: { discussion: DiscussionInfo; user: { id: string; speechLang: string }; code?: string; displayName: string; initialStream: MediaStream | null; initialMic: boolean; initialCam: boolean; record: boolean; mediaHealth: MediaHealth }) {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -227,6 +250,7 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
     let stopped = false;
     const socket = io({ withCredentials: true });
     socketRef.current = socket;
+    const speakingDetector = createSpeakingDetector();
 
     function sendMedia() {
       const sharing = Boolean(lkRef.current?.localParticipant.isScreenShareEnabled);
@@ -287,12 +311,6 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
         setPeers((current) => current.filter((peer) => peer.userId !== participant.identity));
       });
       room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-        const speaking = speakers.some((speaker) => speaker.identity === user.id);
-        if (speaking !== speakingRef.current) {
-          speakingRef.current = speaking;
-          setLocalSpeaking(speaking);
-          socket.emit("speaking", { speaking });
-        }
         const ids = new Set(speakers.map((speaker) => speaker.identity));
         setPeers((current) => current.map((peer) => ({ ...peer, speaking: ids.has(peer.userId) })));
       });
@@ -429,11 +447,11 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
         analyser.getByteTimeDomainData(data);
         let sum = 0;
         for (const value of data) { const n = (value - 128) / 128; sum += n * n; }
-        const speaking = micRef.current && Math.sqrt(sum / data.length) > 0.045;
-        if (speaking !== speakingRef.current) {
-          speakingRef.current = speaking;
-          setLocalSpeaking(speaking);
-          socket.emit("speaking", { speaking });
+        const event = speakingDetector.update(Math.sqrt(sum / data.length), micRef.current, performance.now());
+        if (event !== null) {
+          speakingRef.current = event;
+          setLocalSpeaking(event);
+          socket.emit("speaking", { speaking: event });
         }
         frame = requestAnimationFrame(watch);
       };
@@ -553,6 +571,7 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
       </header>
       <div className="meet-body">
         <section className="meet-stage">
+          {!mediaHealth.ready && <div className="media-down" role="alert"><strong>Video and audio are unavailable</strong><p>{mediaHealth.error || "Check the LiveKit server and reconnect."}</p></div>}
           {waiting && <div className="toast">The host has not started yet. You will enter automatically.</div>}
           {aiNotes.slice(-1).map((note) => <div key={`${note.speakerId}-${note.correction}`} className="toast" role="status">{discussion.isHost ? `Fact-check, ${note.name}: ${note.correction}` : `AI note on your point: ${note.correction}`}</div>)}
           {prompts.slice(-1).map((prompt) => <div key={prompt.id} className="toast" aria-live="polite">{prompt.message} <span className="muted">({prompt.source === "gemini" || prompt.source === "model" ? "Gemini" : "moderator template"})</span></div>)}

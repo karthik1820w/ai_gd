@@ -24,10 +24,15 @@ export function safeEqual(left: string, right: string) {
 }
 
 export function appOrigin(request?: Request) {
-  if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, "");
-  if (!request) return "http://localhost:3000";
-  const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || "localhost:3000";
-  const proto = request.headers.get("x-forwarded-proto") || "http";
+  const configured = process.env.APP_URL?.trim();
+  if (configured) {
+    const url = new URL(configured);
+    if (!["localhost", "127.0.0.1", "::1"].includes(url.hostname.toLowerCase())) return configured.replace(/\/+$/, "");
+  }
+  if (!request) return configured?.replace(/\/+$/, "") || "http://localhost:3000";
+  const requestUrl = new URL(request.url);
+  const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || requestUrl.host || "localhost:3000";
+  const proto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() || requestUrl.protocol.replace(":", "");
   return `${proto}://${host}`;
 }
 

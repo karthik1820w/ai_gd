@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "plugins": [],
+    "types": ["node"]
+  },
+  "include": [
+    "server/**/*.ts",
+    "src/server/**/*.ts",
+    "src/lib/**/*.ts",
+    "prisma/**/*.ts",
+    "prisma.config.ts",
+    "scripts/**/*.ts",
+    "test/**/*.ts"
+  ],
+  "exclude": ["node_modules", ".next"]
+}

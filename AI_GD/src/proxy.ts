@@ -4,7 +4,7 @@ import { jwtVerify } from "jose";
 
 const publicPaths = new Set(["/", "/login", "/register", "/forgot-password", "/reset-password", "/api/health", "/api/auth/login", "/api/auth/register", "/api/auth/forgot", "/api/auth/reset"]);
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   if (pathname.startsWith("/_next") || pathname === "/icon.svg") return NextResponse.next();
   const token = request.cookies.get("quorum_token")?.value;

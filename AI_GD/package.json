@@ -3,19 +3,18 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "tsx server/index.ts",
-    "dev:https": "tsx server/index.ts --https",
+    "dev": "node --import tsx scripts/start-dev.mjs",
+    "dev:https": "node --import tsx scripts/start-dev.mjs --https",
     "build": "next build",
-    "start": "tsx server/index.ts",
+    "start": "node --import tsx scripts/start-production.mjs",
+    "fetch:livekit": "node scripts/fetch-livekit.mjs",
+    "setup": "node scripts/setup.mjs",
     "cert": "tsx scripts/make-cert.ts",
     "db:push": "prisma db push",
     "seed": "tsx prisma/seed.ts",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.server.json",
     "postinstall": "prisma generate"
-  },
-  "prisma": {
-    "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.16.2",

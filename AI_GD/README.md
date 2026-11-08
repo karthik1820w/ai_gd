@@ -109,29 +109,30 @@ Ports:
 
 The media server advertises this computer's Wi-Fi address so other devices can connect. VirtualBox's `192.168.56.x` address is skipped. Set `LIVEKIT_NODE_IP` if you need a specific address. Set `LIVEKIT_URL` if browsers should use a different WebSocket address than `ws://<page-host>:7880`.
 
-`http://localhost` can use the camera and microphone. A phone on the same Wi-Fi cannot, until you create a certificate and use HTTPS:
+`http://localhost` can use the camera and microphone. A phone on the same Wi-Fi needs HTTPS. Create a certificate and use HTTPS:
 
 ```bash
 npm run cert
 npm run dev:https
 ```
 
-Accept the browser's certificate warning. Windows may ask to allow `livekit-server.exe` through the firewall the first time someone joins from another device.
+Accept the browser's certificate warning. Allow ports 3000/TCP, 7880/TCP, 7881/TCP, and 7882/UDP through the firewall for LAN access. For HTTPS-hosted rooms, configure `LIVEKIT_URL` to a secure `wss://` LiveKit endpoint; the local development media listener on port 7880 does not itself terminate TLS.
 
 ## Start again tomorrow
 
-From the project folder:
+From the `AI_GD` folder:
 
 ```bash
 npm install
-npx prisma db push
-npm run seed
+npm run setup
 npm run dev
 ```
 
-Then open http://localhost:3000.
+`npm run setup` creates `.env` if needed, generates local JWT and LiveKit secrets, applies the schema, seeds demo accounts, and downloads a checksum-verified LiveKit server binary on Windows or Linux. Then open http://localhost:3000.
 
-`npm install` and `db push` are only needed after a fresh checkout or a schema change. The SQLite file `prisma/dev.db` is already there, so tomorrow `npm run dev` is enough.
+On macOS, LiveKit does not publish an official server binary. Start the optional container instead with `docker compose --env-file .env -f compose.livekit.yml up -d`. On Windows and Linux, if the download is unavailable, install Docker and use the same compose command.
+
+`npm run setup` is needed after a fresh checkout or a schema change. After setup, `npm run dev` is enough.
 
 Demo accounts from the seed. Change `SEED_PASSWORD` in `.env` before anyone else uses this machine.
 
@@ -141,7 +142,7 @@ Demo accounts from the seed. Change `SEED_PASSWORD` in `.env` before anyone else
 
 A second participant needs another registered participant account, or a second browser profile. Video needs two browsers.
 
-**Friday room check** (meeting `a100e11291`, code `316641`) was left live when the server stopped. Tomorrow it can still show as live until you open it and choose **End and score**.
+If a session was left live when the server stopped, open it and choose **End and score** to close it.
 
 ## Scripts
 
@@ -150,12 +151,14 @@ A second participant needs another registered participant account, or a second b
 | `npm run dev` | Website, Socket.IO, and the media server |
 | `npm run dev:https` | Same, with `certs/key.pem` and `certs/cert.pem` |
 | `npm run cert` | Creates a local self-signed certificate |
+| `npm run setup` | First-run configuration, database setup, seed, and media binary |
+| `npm run fetch:livekit` | Download and verify the official LiveKit release binary |
 | `npm run db:push` | Applies `prisma/schema.prisma` to SQLite |
 | `npm run seed` | Creates the demo host and participant |
 | `npm test` | Unit tests in `test/*.test.ts` |
-| `npm run typecheck` | `tsc --noEmit` |
+| `npm run typecheck` | Typecheck app, server, scripts, Prisma, and tests |
 | `npm run build` | Production Next.js build |
-| `npm start` | Production process. Still the custom server, not `next start` |
+| `npm start` | Production process; requires `npm run build` first |
 
 ## Environment
 
@@ -166,6 +169,8 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 | `DATABASE_URL` | SQLite file, default `file:./dev.db` next to the Prisma schema |
 | `JWT_SECRET` | Required; signs the `quorum_token` session cookie (at least 16 characters) |
 | `APP_URL` | Public origin, used in links |
+| `TRUST_PROXY` | Set to `1` only behind a trusted reverse proxy that overwrites forwarded headers |
+| `COOKIE_SECURE` | Optional `on`/`off`; otherwise follows the request protocol |
 | `AI_ENABLED` | Set to `off` to disable Gemini even when a key is configured |
 | `GEMINI_API_KEY`, `GEMINI_FLASH_API_KEY` | Server-side Gemini keys; either one can be used for both tiers |
 | `GEMINI_BASE_URL`, `GEMINI_FLASH_MODEL`, `GEMINI_FINAL_MODEL` | Optional API endpoint and tier models |
@@ -178,6 +183,7 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Must match the key pair passed to the media server |
 | `LIVEKIT_NODE_IP` | Address advertised to other devices. Blank uses the Wi-Fi address |
 | `LIVEKIT_URL` | Optional public WebSocket URL for browsers |
+| `LIVEKIT_BINARY` | Optional path to a LiveKit executable; otherwise `bin/livekit-server[.exe]` |
 | `STUN_URLS`, `TURN_URL`, `TURN_USERNAME`, `TURN_PASSWORD` | ICE servers. Google STUN is the default. TURN is needed only for strict firewalls |
 | `SEED_HOST_EMAIL`, `SEED_PARTICIPANT_EMAIL`, `SEED_PASSWORD` | Demo accounts |
 
@@ -199,7 +205,7 @@ src/app/participant      Participant dashboard, join, and own report
 src/app/meeting          Lobby and live room
 src/components/MeetingApp.tsx   Live room UI
 prisma/schema.prisma     Users, discussions, transcript, scores, reports
-bin/livekit-server.exe   Media server binary. Not committed
+bin/livekit-server       Downloaded media binary. Not committed
 data/recordings          Per-person microphone files, uploaded on leave
 ```
 
