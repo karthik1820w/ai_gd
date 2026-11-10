@@ -6,7 +6,6 @@ import { networkInterfaces } from "os";
 import { parse } from "url";
 import next from "next";
 import { Server } from "socket.io";
-import { enableWal } from "../src/lib/db";
 import { startLoops } from "../src/server/loops";
 import { setIO } from "../src/server/realtime";
 import { attachSignaling } from "../src/server/signaling";
@@ -68,7 +67,6 @@ if (missing.length) {
 process.env.LIVEKIT_NODE_IP ||= lanAddresses()[0] || "127.0.0.1";
 await startMediaServer();
 await app.prepare();
-await enableWal().catch((error) => console.error("Could not enable SQLite WAL mode.", error));
 
 const server = useHttps
   ? createHttps(

@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/db";
 import { cookieOptions, signSession } from "@/lib/auth";
 import { clientKey, fail, guardOrigin, json, rateLimit, readBody } from "@/lib/http";
+import { HOST_EMAIL } from "@/lib/roles";
 import { registerSchema } from "@/lib/validators";
 
 export async function POST(request: Request) {
@@ -17,16 +18,17 @@ export async function POST(request: Request) {
     return fail("Account creation is temporarily unavailable. Please contact the administrator.", 503);
   }
   const email = parsed.data.email.toLowerCase();
+  if (email === HOST_EMAIL) return fail("This host account is provisioned by an administrator. Please sign in.", 403);
   const existingMessage = "This email is already registered.";
   if (await prisma.user.findUnique({ where: { email } })) return fail(existingMessage, 409);
   try {
     const user = await prisma.user.create({
-      data: { email, name: parsed.data.name, role: parsed.data.role, passwordHash: await bcrypt.hash(parsed.data.password, 12) },
+      data: { email, name: parsed.data.name, role: "PARTICIPANT", passwordHash: await bcrypt.hash(parsed.data.password, 12) },
     });
     const token = await signSession(user);
     const jar = await cookies();
     jar.set("quorum_token", token, cookieOptions(request));
-    return json({ id: user.id, name: user.name, role: user.role, next: user.role === "HOST" ? "/host" : "/participant" });
+    return json({ id: user.id, name: user.name, role: user.role, next: "/participant" });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return fail(existingMessage, 409);
     console.error("Account registration failed.", error);

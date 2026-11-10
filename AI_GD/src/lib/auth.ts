@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { SignJWT, jwtVerify } from "jose";
 import { prisma } from "@/lib/db";
+import { authorizedRole } from "@/lib/roles";
 import { secureCookie } from "@/lib/securityConfig";
 
 export const COOKIE = "quorum_token";
@@ -49,8 +50,10 @@ export async function readSession(): Promise<SessionUser | null> {
       where: { id: String(payload.sub) },
       select: { id: true, email: true, name: true, role: true, speechLang: true },
     });
-    if (!user || user.role !== payload.role) return null;
-    return user;
+    if (!user) return null;
+    const role = authorizedRole(user.email, user.role);
+    if (role !== payload.role) return null;
+    return { ...user, role };
   } catch {
     return null;
   }

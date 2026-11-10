@@ -15,7 +15,7 @@ export default function HomePage() {
         <h1 className="serif" style={{ fontSize: "clamp(40px, 6vw, 72px)", lineHeight: 1.02, maxWidth: 760, marginBottom: 12 }}>Every voice stays attached to the person who spoke.</h1>
         <p className="muted" style={{ fontSize: 18, maxWidth: 640 }}>Hosts open a discussion, share a link and access code, and run a live audio and video room. Quorum transcribes each microphone separately, checks what was said against the topic, and writes a report a participant can actually read.</p>
         <div style={{ display: "flex", gap: 10, margin: "22px 0 36px" }}>
-          <Link className="btn btn-primary" href="/register">Start as a host</Link>
+          <Link className="btn btn-primary" href="/register">Create participant account</Link>
           <Link className="btn btn-ghost" href="/login">I have an account</Link>
         </div>
         <div className="grid-stats">

@@ -128,17 +128,17 @@ npm run setup
 npm run dev
 ```
 
-`npm run setup` creates `.env` if needed, generates local JWT and LiveKit secrets, applies the schema, seeds demo accounts, and downloads a checksum-verified LiveKit server binary on Windows or Linux. Then open http://localhost:3000.
+Before setup, set `DATABASE_URL` in `.env` to your PostgreSQL connection string. For Supabase, copy the PostgreSQL connection string from **Project Settings → Database**; the project URL alone is not a database connection string. Set `SEED_PASSWORD` to a unique password of at least 16 characters before running setup. `npm run setup` creates `.env` if needed, generates local JWT and LiveKit secrets, applies the schema, provisions the fixed host and a demo participant, and downloads a checksum-verified LiveKit server binary on Windows or Linux. Then open http://localhost:3000.
 
 On macOS, LiveKit does not publish an official server binary. Start the optional container instead with `docker compose --env-file .env -f compose.livekit.yml up -d`. On Windows and Linux, if the download is unavailable, install Docker and use the same compose command.
 
 `npm run setup` is needed after a fresh checkout or a schema change. After setup, `npm run dev` is enough.
 
-Demo accounts from the seed. Change `SEED_PASSWORD` in `.env` before anyone else uses this machine.
+The host account is provisioned only by the trusted seed process. Its email is fixed to `karthiksathish1820@gmail.com`; public registrations cannot create this account or choose a role. `npm run seed` sets the host role for that account and demotes any other host accounts to participants. New public registrations are participants.
 
-- Host: `host@quorum.local`
+- Host: `karthiksathish1820@gmail.com`
 - Participant: `participant@quorum.local`
-- Password: the value of `SEED_PASSWORD` (default `Quorum-demo-2026`)
+- Password: the value of `SEED_PASSWORD` in `.env`
 
 A second participant needs another registered participant account, or a second browser profile. Video needs two browsers.
 
@@ -153,7 +153,7 @@ If a session was left live when the server stopped, open it and choose **End and
 | `npm run cert` | Creates a local self-signed certificate |
 | `npm run setup` | First-run configuration, database setup, seed, and media binary |
 | `npm run fetch:livekit` | Download and verify the official LiveKit release binary |
-| `npm run db:push` | Applies `prisma/schema.prisma` to SQLite |
+| `npm run db:push` | Applies `prisma/schema.prisma` to PostgreSQL |
 | `npm run seed` | Creates the demo host and participant |
 | `npm test` | Unit tests in `test/*.test.ts` |
 | `npm run typecheck` | Typecheck app, server, scripts, Prisma, and tests |
@@ -166,7 +166,7 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | SQLite file, default `file:./dev.db` next to the Prisma schema |
+| `DATABASE_URL` | PostgreSQL connection string; for Supabase, copy it from Project Settings → Database |
 | `JWT_SECRET` | Required; signs the `quorum_token` session cookie (at least 16 characters) |
 | `APP_URL` | Public origin, used in links |
 | `TRUST_PROXY` | Set to `1` only behind a trusted reverse proxy that overwrites forwarded headers |
@@ -185,7 +185,7 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 | `LIVEKIT_URL` | Optional public WebSocket URL for browsers |
 | `LIVEKIT_BINARY` | Optional path to a LiveKit executable; otherwise `bin/livekit-server[.exe]` |
 | `STUN_URLS`, `TURN_URL`, `TURN_USERNAME`, `TURN_PASSWORD` | ICE servers. Google STUN is the default. TURN is needed only for strict firewalls |
-| `SEED_HOST_EMAIL`, `SEED_PARTICIPANT_EMAIL`, `SEED_PASSWORD` | Demo accounts |
+| `SEED_PARTICIPANT_EMAIL`, `SEED_PASSWORD` | Trusted seed account provisioning; use a unique password of at least 16 characters |
 
 Passwords are hashed with bcrypt (cost 12). Password-reset tokens last 30 minutes.
 

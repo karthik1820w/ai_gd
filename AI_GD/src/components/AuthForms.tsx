@@ -67,7 +67,7 @@ export function RegisterForm() {
     setAccountExists(false);
     const form = new FormData(event.currentTarget);
     try {
-      const data = await send("/api/auth/register", { name: form.get("name"), email: form.get("email"), password: form.get("password"), role: form.get("role") });
+      const data = await send("/api/auth/register", { name: form.get("name"), email: form.get("email"), password: form.get("password") });
       router.push(responseString(data, "next"));
       router.refresh();
     } catch (err) {
@@ -81,12 +81,7 @@ export function RegisterForm() {
       <label className="field">Name<input name="name" required minLength={2} /></label>
       <label className="field">Email<input name="email" type="email" required /></label>
       <label className="field">Password<input name="password" type="password" minLength={8} required /></label>
-      <label className="field">Role
-        <select name="role" defaultValue="PARTICIPANT">
-          <option value="PARTICIPANT">Participant</option>
-          <option value="HOST">Host</option>
-        </select>
-      </label>
+      <p className="muted">New accounts are participants. The host account is provisioned separately.</p>
       {error && <p className="error">{error}{accountExists && <> <a href="/login">Sign in to your existing account</a>.</>}</p>}
       <button className="btn btn-primary">Create account</button>
     </form>
