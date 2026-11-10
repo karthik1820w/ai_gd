@@ -12,7 +12,7 @@
     "cert": "tsx scripts/make-cert.ts",
     "db:push": "prisma db push",
     "seed": "tsx prisma/seed.ts",
-    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
+    "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.server.json",
     "postinstall": "prisma generate"
   },
