@@ -11,6 +11,7 @@
     "setup": "node scripts/setup.mjs",
     "cert": "tsx scripts/make-cert.ts",
     "db:push": "prisma db push",
+    "db:push:vercel": "prisma db push",
     "seed": "tsx prisma/seed.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.server.json",

@@ -154,6 +154,7 @@ If a session was left live when the server stopped, open it and choose **End and
 | `npm run setup` | First-run configuration, database setup, seed, and media binary |
 | `npm run fetch:livekit` | Download and verify the official LiveKit release binary |
 | `npm run db:push` | Applies `prisma/schema.prisma` to PostgreSQL |
+| `npm run db:push:vercel` | Applies the schema using `DIRECT_URL` when configured |
 | `npm run seed` | Creates the demo host and participant |
 | `npm test` | Unit tests in `test/*.test.ts` |
 | `npm run typecheck` | Typecheck app, server, scripts, Prisma, and tests |
@@ -166,7 +167,8 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string; for Supabase, copy it from Project Settings → Database |
+| `DATABASE_URL` | PostgreSQL connection string; use Neon/Supabase's pooled URL for serverless runtime |
+| `DIRECT_URL` | Optional unpooled PostgreSQL URL used by Prisma schema commands |
 | `JWT_SECRET` | Required; signs the `quorum_token` session cookie (at least 16 characters) |
 | `APP_URL` | Public origin, used in links |
 | `TRUST_PROXY` | Set to `1` only behind a trusted reverse proxy that overwrites forwarded headers |
@@ -188,6 +190,19 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 | `SEED_PARTICIPANT_EMAIL`, `SEED_PASSWORD` | Trusted seed account provisioning; use a unique password of at least 16 characters |
 
 Passwords are hashed with bcrypt (cost 12). Password-reset tokens last 30 minutes.
+
+## Deploying the web app to Vercel
+
+The app now uses PostgreSQL. Vercel functions need a persistent PostgreSQL database; Neon is supported:
+
+1. Set the Vercel project root directory to `AI_GD` and connect it to the intended GitHub repository and branch.
+2. Create a Neon database. Set `DATABASE_URL` to its pooled connection string and `DIRECT_URL` to its direct connection string in Vercel's environment settings. Also set a strong `JWT_SECRET` and the other required production secrets.
+3. Before the first deployment, run `npm run db:push:vercel` from `AI_GD` with those Neon URLs in the environment. This initializes the schema; do not commit either URL.
+4. Deploy with the standard `npm run build` command.
+
+The Vercel build does not automatically alter the database schema. After schema changes, run `npm run db:push:vercel` against the intended Neon database before deploying.
+
+Vercel does not run this project's custom Node server. The web/API routes can run there, but Socket.IO and the bundled LiveKit media server need a separate always-on server; see the self-hosted run instructions above.
 
 ## Layout
 
