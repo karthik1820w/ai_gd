@@ -5,9 +5,26 @@ import { FormEvent, useState } from "react";
 
 async function send(url: string, body: unknown) {
   const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "Something went wrong.");
+  const responseText = await response.text();
+  let data: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(responseText);
+    if (parsed && typeof parsed === "object") data = parsed as Record<string, unknown>;
+  } catch {
+    if (!response.ok) throw new Error(`The server could not complete the request (HTTP ${response.status}). Please try again.`);
+  }
+  if (!response.ok) {
+    const message = typeof data.error === "string" ? data.error : `The server could not complete the request (HTTP ${response.status}). Please try again.`;
+    throw new Error(message);
+  }
+  if (!responseText || Object.keys(data).length === 0) throw new Error("The server returned an invalid response. Please try again.");
   return data;
+}
+
+function responseString(data: Record<string, unknown>, key: string) {
+  const value = data[key];
+  if (typeof value !== "string") throw new Error("The server returned an invalid response. Please try again.");
+  return value;
 }
 
 export function LoginForm() {
@@ -23,7 +40,7 @@ export function LoginForm() {
     try {
       const next = params.get("next");
       const data = await send(`/api/auth/login${next ? `?next=${encodeURIComponent(next)}` : ""}`, { email: form.get("email"), password: form.get("password") });
-      router.push(data.next);
+      router.push(responseString(data, "next"));
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed.");
@@ -43,16 +60,20 @@ export function LoginForm() {
 export function RegisterForm() {
   const router = useRouter();
   const [error, setError] = useState("");
+  const [accountExists, setAccountExists] = useState(false);
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
+    setAccountExists(false);
     const form = new FormData(event.currentTarget);
     try {
       const data = await send("/api/auth/register", { name: form.get("name"), email: form.get("email"), password: form.get("password"), role: form.get("role") });
-      router.push(data.next);
+      router.push(responseString(data, "next"));
       router.refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create the account.");
+      const message = err instanceof Error ? err.message : "Could not create the account.";
+      setError(message);
+      setAccountExists(message.includes("already registered"));
     }
   }
   return (
@@ -66,7 +87,7 @@ export function RegisterForm() {
           <option value="HOST">Host</option>
         </select>
       </label>
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error">{error}{accountExists && <> <a href="/login">Sign in to your existing account</a>.</>}</p>}
       <button className="btn btn-primary">Create account</button>
     </form>
   );
@@ -82,8 +103,8 @@ export function ForgotForm() {
     const form = new FormData(event.currentTarget);
     try {
       const data = await send("/api/auth/forgot", { email: form.get("email") });
-      setMessage(data.message);
-      setDevLink(data.devResetUrl || "");
+      setMessage(responseString(data, "message"));
+      setDevLink(typeof data.devResetUrl === "string" ? data.devResetUrl : "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start the reset.");
     }
