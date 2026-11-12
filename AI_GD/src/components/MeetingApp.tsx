@@ -396,45 +396,6 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
       setStatus("COMPLETED");
     });
 
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    let recognition: SpeechRecognition | null = null;
-    let buffer = "";
-    let bufferStart = "";
-    let flushTimer = 0;
-    if (Recognition && discussion.transcriptionEnabled && micRef.current) {
-      recognition = new Recognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = user.speechLang || "en-IN";
-      recognition.onresult = (event) => {
-        let finalText = "";
-        let live = "";
-        for (let index = event.resultIndex; index < event.results.length; index += 1) {
-          const piece = event.results[index][0]?.transcript ?? "";
-          if (event.results[index].isFinal) finalText += piece;
-          else live += piece;
-        }
-        setInterim(live);
-        if (finalText.trim()) {
-          if (!buffer) bufferStart = new Date().toISOString();
-          buffer = `${buffer} ${finalText}`.trim();
-          window.clearTimeout(flushTimer);
-          flushTimer = window.setTimeout(() => {
-            if (buffer) socket.emit("transcript", { text: buffer, startedAt: bufferStart, endedAt: new Date().toISOString() });
-            buffer = "";
-            setInterim("");
-          }, /[.?!]$/.test(buffer) ? 700 : 1600);
-        }
-      };
-      recognition.onerror = (event) => {
-        if (event.error === "not-allowed") socket.emit("technical", { kind: "MIC_DENIED", detail: "Speech recognition permission denied" });
-      };
-      recognition.onend = () => { if (!stopped && micRef.current) { try { recognition?.start(); } catch { /* already started */ } } };
-      try { recognition.start(); } catch { socket.emit("technical", { kind: "SPEECH_UNSUPPORTED", detail: "Could not start speech recognition" }); }
-    } else if (discussion.transcriptionEnabled) {
-      socket.emit("technical", { kind: "SPEECH_UNSUPPORTED", detail: "This browser has no SpeechRecognition API" });
-    }
-
     const audioTrack = localRef.current.getAudioTracks().find((track) => track.enabled);
     if (audioTrack) {
       const context = new AudioContext();
@@ -472,8 +433,6 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
 
     return () => {
       stopped = true;
-      window.clearTimeout(flushTimer);
-      recognition?.stop();
       socket.emit("leave");
       socket.disconnect();
       void lkRef.current?.disconnect();
@@ -482,6 +441,94 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
     // The room connection is created once per entry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [discussion.id]);
+
+  // Speech is recognised in this browser, so transcription is tied to the local
+  // microphone: it runs only while transcription is on, the mic is open and the
+  // discussion has not ended. Restarting on `onend` is what keeps it alive,
+  // because Chrome stops `continuous` recognition after a pause in speech.
+  useEffect(() => {
+    if (!discussion.transcriptionEnabled || !micOn || ended) return;
+    const socket = socketRef.current;
+    if (!socket) return;
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) {
+      socket.emit("technical", { kind: "SPEECH_UNSUPPORTED", detail: "This browser has no SpeechRecognition API" });
+      return;
+    }
+
+    const recognition = new Recognition();
+    let stopped = false;
+    let active = false;
+    let buffer = "";
+    let bufferStart = "";
+    let flushTimer = 0;
+    let restartTimer = 0;
+
+    const flush = () => {
+      if (buffer) socket.emit("transcript", { text: buffer, startedAt: bufferStart, endedAt: new Date().toISOString() });
+      buffer = "";
+      setInterim("");
+    };
+
+    const start = () => {
+      if (stopped || active) return;
+      active = true;
+      try {
+        recognition.start();
+      } catch {
+        active = false;
+        restartTimer = window.setTimeout(start, 800);
+      }
+    };
+
+    const release = () => { active = false; };
+
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = user.speechLang || "en-IN";
+    recognition.onresult = (event) => {
+      let finalText = "";
+      let live = "";
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const piece = event.results[index][0]?.transcript ?? "";
+        if (event.results[index].isFinal) finalText += piece;
+        else live += piece;
+      }
+      setInterim(live);
+      if (!finalText.trim()) return;
+      if (!buffer) bufferStart = new Date().toISOString();
+      buffer = `${buffer} ${finalText}`.trim();
+      window.clearTimeout(flushTimer);
+      // Short turns in a discussion rarely end on punctuation, so flush early.
+      flushTimer = window.setTimeout(flush, /[.?!]$/.test(buffer) ? 500 : 1200);
+    };
+    recognition.onerror = (event) => {
+      release();
+      const kind = event.error ?? "unknown";
+      if (kind === "not-allowed" || kind === "service-not-allowed") {
+        socket.emit("technical", { kind: "MIC_DENIED", detail: "Speech recognition permission denied" });
+        return;
+      }
+      if (kind === "no-speech" || kind === "aborted") return;
+      socket.emit("technical", { kind: "SPEECH_ERROR", detail: `Speech recognition stopped: ${kind}` });
+      restartTimer = window.setTimeout(start, 1000);
+    };
+    recognition.onend = () => {
+      release();
+      if (!stopped) restartTimer = window.setTimeout(start, 400);
+    };
+    start();
+
+    return () => {
+      stopped = true;
+      window.clearTimeout(flushTimer);
+      window.clearTimeout(restartTimer);
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+      try { recognition.stop(); } catch { /* already stopped */ }
+    };
+  }, [discussion.id, discussion.transcriptionEnabled, micOn, user.speechLang, ended]);
 
   function signalMedia(audio: boolean, video: boolean, screen: boolean) {
     socketRef.current?.emit("media-state", { audio, video, hand: handRef.current, screen });
@@ -592,6 +639,15 @@ function Room({ discussion, user, code, displayName, initialStream, initialMic, 
               <strong>Your running scores</strong>
               <p>Knowledge {myLiveScore.knowledge} · Participation {myLiveScore.participation} · Thinking {myLiveScore.thinking}</p>
             </section>}
+            {panel === "transcript" && segments.length === 0 && (
+              <p className="muted">
+                {!discussion.transcriptionEnabled
+                  ? "Transcription is off for this discussion."
+                  : !micOn
+                    ? "Turn your microphone on to be transcribed."
+                    : "Listening. Your speech appears here as you talk."}
+              </p>
+            )}
             {panel === "transcript" && segments.map((segment) => (
               <article key={segment.id}>
                 <strong>{segment.name}</strong> <span className="muted">{new Date(segment.startedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>

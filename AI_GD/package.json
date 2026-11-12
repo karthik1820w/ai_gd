@@ -6,12 +6,13 @@
     "dev": "node --import tsx scripts/start-dev.mjs",
     "dev:https": "node --import tsx scripts/start-dev.mjs --https",
     "build": "next build",
+    "vercel-build": "prisma db push --skip-generate && next build",
     "start": "node --import tsx scripts/start-production.mjs",
+    "start:deploy": "prisma db push --skip-generate && node --import tsx scripts/start-production.mjs",
     "fetch:livekit": "node scripts/fetch-livekit.mjs",
     "setup": "node scripts/setup.mjs",
     "cert": "tsx scripts/make-cert.ts",
     "db:push": "prisma db push",
-    "db:push:vercel": "prisma db push",
     "seed": "tsx prisma/seed.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.server.json",
@@ -28,11 +29,13 @@
     "next": "^16.4.5",
     "nodemailer": "^10.3.1",
     "pdfkit": "^0.17.2",
+    "prisma": "^6.19.3",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "recharts": "^2.15.4",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
+    "tsx": "^4.20.5",
     "zod": "^4.6.7"
   },
   "devDependencies": {
@@ -44,10 +47,8 @@
     "@types/react-dom": "^19.1.9",
     "autoprefixer": "^10.4.21",
     "postcss": "^8.5.6",
-    "prisma": "^6.19.3",
     "selfsigned": "^2.4.1",
     "tailwindcss": "^3.4.17",
-    "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   }
 }

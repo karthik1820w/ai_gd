@@ -1,0 +1,50 @@
+# Render blueprint for Quorum.
+# Create a Blueprint instance from this repository and Render provisions the
+# web service plus its PostgreSQL database, then wires DATABASE_URL for you.
+services:
+  - type: web
+    name: quorum
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    # `start:deploy` applies the Prisma schema before booting the custom
+    # Next.js + Socket.IO server, so a fresh database works on the first deploy.
+    startCommand: npm run start:deploy
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22.20.0"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: quorum-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      # Behind Render's proxy these two are required, otherwise the app strips
+      # x-forwarded-host/proto and every POST fails the origin check.
+      - key: TRUST_PROXY
+        value: "1"
+      - key: COOKIE_SECURE
+        value: "true"
+      # You choose these two: the one host account's sign-in.
+      - key: HOST_EMAIL
+        sync: false
+      - key: HOST_PASSWORD
+        sync: false
+      # LiveKit Cloud: https://cloud.livekit.io -> Settings -> Keys.
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      # Optional: enables Gemini analysis instead of the heuristic fallback.
+      - key: GEMINI_API_KEY
+        sync: false
+
+databases:
+  - name: quorum-db
+    plan: free
+    databaseName: quorum
+    user: quorum

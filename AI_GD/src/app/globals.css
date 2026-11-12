@@ -86,6 +86,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .side-tabs button[aria-selected="true"] { background: #24302b; color: white; }
 .side-body { overflow: auto; padding: 8px 12px 16px; display: flex; flex-direction: column; gap: 10px; }
 .caption { background: rgba(0,0,0,.55); border-radius: 12px; padding: 8px 12px; min-height: 42px; }
+.side .field input, .side .field textarea, .side .field select { background: #24302b; color: #f4f1ea; border-color: #3a4a43; }
+.side .field input::placeholder, .side .field textarea::placeholder { color: #9aa8a0; }
+.side .field { color: #c9c2b6; }
+.side .muted { color: #a8b2ac; }
 .toast { background: #24302b; border-radius: 12px; padding: 10px 12px; }
 .meter { height: 8px; background: #e4ddd1; border-radius: 99px; overflow: hidden; }
 .meter span { display: block; height: 100%; background: var(--accent); width: 0; }

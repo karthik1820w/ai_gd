@@ -72,6 +72,7 @@ export default async function HostSessionPage({ params }: { params: Promise<{ id
               <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=SUMMARY`}>Summary PDF</a>
               <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=COMBINED&download=1`}>Combined scores PDF</a>
               <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=TRANSCRIPT`}>Transcript PDF</a>
+              {(["txt", "md", "srt", "json"] as const).map((format) => <a key={format} className="btn btn-ghost" href={`/api/discussions/${discussion.id}/transcript?format=${format}&download=1`}>Transcript .{format}</a>)}
               <a className="btn btn-ghost" href={`/host/sessions/${discussion.id}/preview`}>Preview a PDF</a>
             </div>
             {discussion.summary?.points.map((point) => <p key={point.id}><strong>{point.kind.toLowerCase()}: </strong>{point.body}</p>)}

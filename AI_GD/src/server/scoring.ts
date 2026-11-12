@@ -1,7 +1,7 @@
 import { embed, cosine } from "./embed.ts";
 
 export const COOKIE = "quorum_token";
-export const FORMULA_VERSION = "1";
+export const FORMULA_VERSION = "2";
 
 export const WEIGHTS = {
   topicRelevance: 0.25,
@@ -87,6 +87,26 @@ const LOGIC = /\b(because|therefore|thus|however|although|which means|as a resul
 const RESPONSE = /\b(i agree|i disagree|building on|to add|your point|as you said|in response|that point|i would add|counter)\b/i;
 const HOSTILE = /\b(idiot|stupid|shut up)\b/i;
 
+/**
+ * Clarity heuristic for one spoken contribution (0-100). Length band, sentence
+ * shape, filler sounds and hostility only; accent and delivery are not inputs.
+ * Exported so the transcript generator can score merged speaking turns rather
+ * than the short fragments speech recognition emits at every pause.
+ */
+export function communicationScore(text: string) {
+  const clean = text.trim();
+  const words = wordCount(clean);
+  let communication = 58;
+  if (words < 4) communication = 36;
+  else if (words >= 8 && words <= 70) communication = 80;
+  else if (words > 110) communication = 64;
+  if (/[.?!]/.test(clean)) communication += 4;
+  const fillers = clean.match(/\b(um+|uh+|er+|hmm+)\b/gi)?.length ?? 0;
+  communication -= (fillers / Math.max(words, 1)) * 30;
+  if (HOSTILE.test(clean)) communication -= 15;
+  return clamp(communication);
+}
+
 export type PriorLine = {
   text: string;
   relevance?: RelevanceLabel;
@@ -152,15 +172,7 @@ export function classifyStatement(input: {
   const newPerspective = !repeatsPrior && (relevance === "HIGHLY_RELEVANT" || relevance === "RELEVANT") && priorOverlap < 0.35 && words >= 8;
   const positiveContribution = !hostile && relevance !== "IRRELEVANT";
 
-  let communication = 58;
-  if (words < 4) communication = 36;
-  else if (words >= 8 && words <= 70) communication = 80;
-  else if (words > 110) communication = 64;
-  if (/[.?!]/.test(text)) communication += 4;
-  const fillers = text.match(/\b(um+|uh+|er+|hmm+)\b/gi)?.length ?? 0;
-  communication -= (fillers / Math.max(words, 1)) * 30;
-  if (hostile) communication -= 15;
-  communication = clamp(communication);
+  const communication = communicationScore(text);
 
   let knowledge = 42;
   if (relevance === "HIGHLY_RELEVANT") knowledge = 78;

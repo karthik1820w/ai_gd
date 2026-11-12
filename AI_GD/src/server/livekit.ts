@@ -8,8 +8,11 @@ function secret() {
   return process.env.LIVEKIT_API_SECRET || "";
 }
 
+/** Server-side API address. Derived from LIVEKIT_URL (wss -> https) so a hosted project needs no extra setting. */
 export function livekitHttp() {
-  return process.env.LIVEKIT_HOST || "http://127.0.0.1:7880";
+  if (process.env.LIVEKIT_HOST) return process.env.LIVEKIT_HOST;
+  if (process.env.LIVEKIT_URL) return process.env.LIVEKIT_URL.replace(/^ws/i, "http");
+  return "http://127.0.0.1:7880";
 }
 
 export function livekitPublicUrl(request: Request) {

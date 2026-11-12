@@ -8,7 +8,10 @@ import { dropRoom, snapshot } from "@/server/activity";
 import { finalizeJournal } from "@/server/journal";
 import { notify } from "@/server/notify";
 import { emitDiscussion } from "@/server/realtime";
-import { FORMULA_VERSION, buildFeedback, categoryFor, classifyStatement, scoreParticipant, type PriorLine, type RelevanceLabel } from "@/server/scoring";
+import { blendExaminer, computeRubric, parseRubricWeights } from "@/server/rubric";
+import { buildTranscript } from "@/server/transcript";
+import { transcribeRecordings } from "@/server/transcribeRecordings";
+import { FORMULA_VERSION, buildFeedback, classifyStatement, scoreParticipant, type PriorLine, type RelevanceLabel } from "@/server/scoring";
 
 type GeminiParticipantReview = {
   knowledge: number;
@@ -182,6 +185,8 @@ async function summarise(discussion: {
 
 export async function evaluateDiscussion(discussionId: string) {
   await waitForPendingAnalysis(discussionId, 8_000);
+  // Fill transcript gaps (browsers without speech recognition) from stored recordings.
+  await transcribeRecordings(discussionId).catch((error) => console.error("Recording transcription failed; scoring continues with the live transcript.", error));
   const discussion = await prisma.discussion.findUnique({
     where: { id: discussionId },
     include: {
@@ -243,6 +248,22 @@ export async function evaluateDiscussion(discussionId: string) {
   }
   const review = await geminiReview(discussion);
   const configuredWeights = aiWeights();
+  const rubricWeights = parseRubricWeights().weights;
+  // Generated transcript: fragments merged into whole speaking turns, used for clarity scoring.
+  const transcriptDoc = buildTranscript({
+    title: discussion.title,
+    topic: discussion.topic,
+    startedAt: discussion.startedAt ?? discussion.scheduledAt,
+    segments: discussion.segments.map((segment) => ({
+      id: segment.id,
+      participantId: segment.participantId,
+      name: segment.participant.displayName,
+      text: segment.text,
+      startedAt: segment.startedAt,
+      endedAt: segment.endedAt,
+      source: segment.source,
+    })),
+  });
 
   const previousAdjustments = await prisma.evaluation.findMany({ where: { discussionId } });
   const adjustments = new Map(previousAdjustments.map((item) => [item.participantId, item]));
@@ -306,6 +327,14 @@ export async function evaluateDiscussion(discussionId: string) {
       examiner,
       weights: configuredWeights.weights,
     });
+    const clarity = transcriptDoc.speakers.find((speaker) => speaker.speakerId === participant.id)?.clarity ?? null;
+    const rubric = computeRubric({
+      scored,
+      communication: clarity,
+      knowledge: pillars.knowledge,
+      reasoning: examiner ? blendExaminer(examiner.thinking, scored.reasoning ?? 0) : null,
+      weights: rubricWeights,
+    });
     const heuristicFeedback = buildFeedback({
       topic: discussion.topic,
       score: scored,
@@ -331,17 +360,13 @@ export async function evaluateDiscussion(discussionId: string) {
         ? { ...heuristicFeedback, remark: "" }
         : { strengths: [], improvements: [], remark: "No contributions were recorded" };
     const kept = adjustments.get(participant.id);
-    const parameters = [
-      ["knowledge", "Knowledge & understanding", configuredWeights.weights[0], pillars.knowledge, examiner ? "Gemini final evaluation blended with live per-contribution analysis." : "Computed from available transcript analysis; Gemini was unavailable."],
-      ["participation", "Participation", configuredWeights.weights[1], pillars.participation, scored.explanations.participation],
-      ["thinking", "Point of view & thinking", configuredWeights.weights[2], pillars.thinking, examiner ? "Gemini final evaluation blended with live reasoning and originality analysis." : "Computed from reasoning, originality, and responses in the transcript."],
-    ] as const;
+    const parameters = rubric.parameters;
     await prisma.evaluation.create({
       data: {
         discussionId,
         participantId: participant.id,
-        overallScore: scored.incomplete ? null : pillars.overall,
-        category: categoryFor(scored.incomplete ? null : pillars.overall, scored.incomplete),
+        overallScore: rubric.overall,
+        category: rubric.category,
         participationPercent: scored.participationPercent,
         speakingMs,
         contributionCount: own.length,
@@ -365,7 +390,7 @@ export async function evaluateDiscussion(discussionId: string) {
         source: examiner ? "gemini" : "heuristic",
         model: examiner ? aiModel("final") : null,
         parameters: {
-          create: parameters.map(([key, label, weight, score, explanation]) => ({
+          create: parameters.map(({ key, label, weight, score, explanation }) => ({
             key,
             label,
             weight,

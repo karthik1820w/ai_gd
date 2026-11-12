@@ -198,6 +198,7 @@ model TranscriptSegment {
   knowledgeScore        Float?
   reasoningScore        Float?
   wordCount             Int                    @default(0)
+  source                String                 @default("live")
   createdAt             DateTime               @default(now())
 
   transcript  Transcript             @relation(fields: [transcriptId], references: [id], onDelete: Cascade)

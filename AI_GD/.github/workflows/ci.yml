@@ -8,26 +8,20 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     env:
-      DATABASE_URL: postgresql://ci:ci@localhost:5432/quorum?schema=public
-      DIRECT_URL: postgresql://ci:ci@localhost:5432/quorum?schema=public
+      DATABASE_URL: postgresql://quorum:quorum@localhost:5432/quorum_ci
+      JWT_SECRET: ci-only-session-secret-not-for-production
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: AI_GD/package-lock.json
+          cache-dependency-path: package-lock.json
       - name: Install dependencies
-        working-directory: AI_GD
         run: npm ci
       - name: Typecheck application and server
-        working-directory: AI_GD
         run: npm run typecheck
       - name: Run unit tests
-        working-directory: AI_GD
         run: npm test
       - name: Build production app
-        working-directory: AI_GD
         run: npm run build
-        env:
-          JWT_SECRET: ci-only-session-secret-not-for-production

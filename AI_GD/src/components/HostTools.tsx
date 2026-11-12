@@ -19,6 +19,15 @@ export function HostActions({ id, status, meetingId }: { id: string; status: str
         <a className="btn btn-primary" href={`/meeting/${meetingId}`}>{status === "LIVE" ? "Rejoin meeting" : "Open meeting"}</a>
         {status !== "COMPLETED" && status !== "CANCELLED" && <button className="btn btn-ghost" onClick={() => act(`/api/discussions/${id}/code`)}>Regenerate code</button>}
         {status === "LIVE" && <button className="btn btn-danger" onClick={() => act(`/api/discussions/${id}/end`)}>End and score</button>}
+        {status === "COMPLETED" && <button className="btn btn-ghost" onClick={async () => {
+          setMessage("Generating transcript from recordings…");
+          const response = await fetch(`/api/discussions/${id}/transcript`, { method: "POST" });
+          const data = await response.json();
+          if (!response.ok) return setMessage(data.error || "Request failed.");
+          const notes = (data.participants ?? []).filter((item: { note?: string }) => item.note).map((item: { name: string; note: string }) => `${item.name}: ${item.note}`);
+          setMessage([data.detail, ...notes].join(" "));
+          router.refresh();
+        }}>Generate from recordings</button>}
         {status === "COMPLETED" && <button className="btn btn-ghost" onClick={() => act(`/api/discussions/${id}/evaluate`)}>Recalculate scores</button>}
         {status !== "LIVE" && <button className="btn btn-ghost" onClick={async () => { if (!confirm("Delete this discussion and its transcript?")) return; await fetch(`/api/discussions/${id}`, { method: "DELETE" }); router.push("/host"); router.refresh(); }}>Delete</button>}
       </div>

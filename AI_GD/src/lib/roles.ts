@@ -1,9 +1,8 @@
-export const HOST_EMAIL = "karthiksathish1820@gmail.com";
+import { isHostEmail } from "@/lib/hostAccount";
 
 export type AccountRole = "HOST" | "PARTICIPANT";
 
-export function authorizedRole(email: string, storedRole: AccountRole): AccountRole {
-  return storedRole === "HOST" && email.trim().toLowerCase() === HOST_EMAIL
-    ? "HOST"
-    : "PARTICIPANT";
+/** The host role is only honoured for the email set in HOST_EMAIL. */
+export function authorizedRole(email: string, storedRole: AccountRole, env: Record<string, string | undefined> = process.env): AccountRole {
+  return storedRole === "HOST" && isHostEmail(email, env) ? "HOST" : "PARTICIPANT";
 }

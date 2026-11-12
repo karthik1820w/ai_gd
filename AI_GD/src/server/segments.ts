@@ -6,6 +6,7 @@ import { readBrief } from "@/server/brief";
 import { noteSpeech } from "@/server/activity";
 import { emitDiscussion, emitUser } from "@/server/realtime";
 import { aiWeights, scoreAIPillars } from "@/server/aiScoring";
+import { computeRubric, parseRubricWeights } from "@/server/rubric";
 import { classifyStatement, scoreParticipant, type Classification, type PriorLine, type RelevanceLabel, wordCount } from "@/server/scoring";
 
 const pendingByDiscussion = new Map<string, Set<Promise<void>>>();
@@ -374,6 +375,7 @@ export async function publishLiveScores(discussionId: string) {
   const active = discussion.participants.filter((participant) => !participant.removed && participant.userId !== discussion.hostId);
   const totalSpeakingMs = active.reduce((sum, participant) => sum + (participant.stat?.speakingMs ?? 0), 0);
   const configuredWeights = aiWeights().weights;
+  const rubricWeights = parseRubricWeights().weights;
   const rows = active.map((participant) => {
     const own = discussion.segments.filter((segment) => segment.participantId === participant.id && segment.relevance !== "PENDING");
     const missed = discussion.missed.filter((item) => item.participantId === participant.id);
@@ -415,6 +417,7 @@ export async function publishLiveScores(discussionId: string) {
       participation: scored.participation,
       weights: configuredWeights,
     });
+    const rubric = computeRubric({ scored, knowledge: pillars.knowledge, weights: rubricWeights });
     return {
       participantId: participant.id,
       userId: participant.userId,
@@ -422,7 +425,7 @@ export async function publishLiveScores(discussionId: string) {
       knowledge: pillars.knowledge,
       participation: pillars.participation,
       thinking: pillars.thinking,
-      overall: pillars.overall,
+      overall: rubric.overall ?? pillars.overall,
       source: own.some((segment) => segment.analysisSource === "gemini") ? "gemini" : "heuristic",
     };
   });

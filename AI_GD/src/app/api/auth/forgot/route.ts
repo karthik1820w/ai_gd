@@ -4,6 +4,7 @@ import { forgotSchema, resetSchema } from "@/lib/validators";
 import { appOrigin, hashToken, newToken } from "@/server/ids";
 import { sendMail } from "@/server/mail";
 import bcrypt from "bcryptjs";
+import { isHostEmail } from "@/lib/hostAccount";
 
 export async function POST(request: Request) {
   const blocked = guardOrigin(request);
@@ -16,7 +17,7 @@ async function forgot(request: Request) {
   if (!rateLimit(`forgot:${clientKey(request)}`, 6, 600_000)) return fail("Too many attempts. Wait a few minutes.", 429);
   const parsed = forgotSchema.safeParse(await readBody(request));
   if (!parsed.success) return fail("Enter the email on your account.");
-  const user = await prisma.user.findUnique({ where: { email: parsed.data.email.toLowerCase() } });
+  const user = isHostEmail(parsed.data.email) ? null : await prisma.user.findUnique({ where: { email: parsed.data.email.toLowerCase() } }); // host password is set by HOST_PASSWORD
   let devResetUrl: string | undefined;
   if (user) {
     const token = newToken();

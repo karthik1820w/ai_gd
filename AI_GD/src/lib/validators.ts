@@ -24,7 +24,7 @@ export const discussionSchema = z.object({
   title: z.string().trim().min(3).max(120),
   topic: z.string().trim().min(3).max(200),
   description: z.string().trim().min(10).max(2000),
-  context: z.string().trim().max(2000).optional().default(""),
+  context: z.string().trim().max(2000).nullish().transform((value) => value ?? ""),
   rules: z.string().trim().min(10).max(2000),
   date: z.string().min(8),
   time: z.string().min(4),

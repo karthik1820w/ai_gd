@@ -39,15 +39,28 @@ Modes:
 
 ## Scoring
 
-Scores are out of 100. Overall weights default to `40,25,35` and are normalized if configured:
+Scores are out of 100 and come from six published criteria, computed from the generated transcript:
 
-| Pillar | Default weight |
+| Criterion | Default weight |
 | --- | ---: |
-| Knowledge and understanding | 40% |
-| Participation | 25% |
-| Point of view and thinking | 35% |
+| Topic relevance | 25% |
+| Communication and clarity | 20% |
+| Knowledge and content quality | 20% |
+| Participation and initiative | 15% |
+| Logical reasoning | 10% |
+| Listening and constructive engagement | 10% |
 
-Knowledge combines live understanding, accuracy, and relevance analysis with the final Gemini evaluation when available. Thinking combines reasoning, originality, and responses to others. Participation is calculated by application code from contributions, speech share, missed invitations, and technical status. Set `AI_WEIGHTS` to three comma-separated weights to change the normalized blend.
+Set `RUBRIC_WEIGHTS` to change them (see Environment). Five numbers (`25,20,20,15,10`) drop the listening criterion and are normalised to 100. Knowledge and reasoning blend live per-contribution analysis with the final Gemini evaluation when available. Clarity is measured on whole speaking turns from the generated transcript, not on the short fragments speech recognition emits at each pause. Participation is calculated by application code from contributions, speech share, missed invitations, and technical status. The live room still shows the three-pillar view (`AI_WEIGHTS`); its overall figure uses the rubric.
+
+## Transcript generator
+
+Live lines are captured in each browser (Web Speech API) and stored per speaker. The generator then builds the transcript used for scoring and export:
+
+- **Merge.** Same-speaker fragments less than 4 seconds apart become one turn, ordered by time, with offsets from the start of the discussion.
+- **Export.** `GET /api/discussions/:id/transcript?format=txt|md|json|srt` (add `&download=1` to save). The host and joined participants can read it; scores are never included. Host buttons are on the session page.
+- **Fill gaps from recordings.** If a participant has no live transcript (for example Firefox or Safari with no speech recognition) but consented to transcription and recording, their microphone recording is decoded with `ffmpeg` and transcribed by the offline Whisper worker. This runs automatically when scoring, and the host can re-run it with **Generate from recordings**. Live lines are never replaced, and generated lines are labelled "(from recording)". Timestamps are placed from the moment the person joined, so they are approximate.
+
+Setup for recording transcription: install `ffmpeg` (or set `FFMPEG`), `pip install -r scripts/stt/requirements.txt`, and run `scripts/stt/fetch-stt-model.sh` (or `.ps1`). Without them, scoring continues with the live transcript and the report stays Incomplete for people who have none.
 
 Each spoken line is labeled **Highly relevant**, **Relevant**, **Partially relevant**, or **Irrelevant** and, when Gemini is available, also receives an accuracy label, concepts, and short live analysis. The report includes speaking time, contribution count, missed opportunities, participation share, and evidence from the transcript.
 
@@ -128,17 +141,13 @@ npm run setup
 npm run dev
 ```
 
-Before setup, set `DATABASE_URL` in `.env` to your PostgreSQL connection string. For Supabase, copy the PostgreSQL connection string from **Project Settings → Database**; the project URL alone is not a database connection string. Set `SEED_PASSWORD` to a unique password of at least 16 characters before running setup. `npm run setup` creates `.env` if needed, generates local JWT and LiveKit secrets, applies the schema, provisions the fixed host and a demo participant, and downloads a checksum-verified LiveKit server binary on Windows or Linux. Then open http://localhost:3000.
+Before setup, set `DATABASE_URL`, `HOST_EMAIL` and `HOST_PASSWORD` in `.env` (copy `.env.example` first). `npm run setup` generates local secrets, applies the schema, creates the host account, and downloads a checksum-verified LiveKit server binary on Windows or Linux. Then open http://localhost:3000.
 
 On macOS, LiveKit does not publish an official server binary. Start the optional container instead with `docker compose --env-file .env -f compose.livekit.yml up -d`. On Windows and Linux, if the download is unavailable, install Docker and use the same compose command.
 
 `npm run setup` is needed after a fresh checkout or a schema change. After setup, `npm run dev` is enough.
 
-The host account is provisioned only by the trusted seed process. Its email is fixed to `karthiksathish1820@gmail.com`; public registrations cannot create this account or choose a role. `npm run seed` sets the host role for that account and demotes any other host accounts to participants. New public registrations are participants.
-
-- Host: `karthiksathish1820@gmail.com`
-- Participant: `participant@quorum.local`
-- Password: the value of `SEED_PASSWORD` in `.env`
+There is one host account, and you choose its sign-in: `HOST_EMAIL` and `HOST_PASSWORD`. It is created automatically the first time the host signs in (no seed step), and changing `HOST_PASSWORD` changes the host password. Public registration cannot use the host email or choose a role; everyone else who registers is a participant.
 
 A second participant needs another registered participant account, or a second browser profile. Video needs two browsers.
 
@@ -154,8 +163,7 @@ If a session was left live when the server stopped, open it and choose **End and
 | `npm run setup` | First-run configuration, database setup, seed, and media binary |
 | `npm run fetch:livekit` | Download and verify the official LiveKit release binary |
 | `npm run db:push` | Applies `prisma/schema.prisma` to PostgreSQL |
-| `npm run db:push:vercel` | Applies the schema using `DIRECT_URL` when configured |
-| `npm run seed` | Creates the demo host and participant |
+| `npm run seed` | Optional: creates the host account now from `HOST_EMAIL` / `HOST_PASSWORD` |
 | `npm test` | Unit tests in `test/*.test.ts` |
 | `npm run typecheck` | Typecheck app, server, scripts, Prisma, and tests |
 | `npm run build` | Production Next.js build |
@@ -165,44 +173,36 @@ If a session was left live when the server stopped, open it and choose **End and
 
 Copy `.env.example` to `.env`. Never commit `.env`.
 
+**Required**
+
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string; use Neon/Supabase's pooled URL for serverless runtime |
-| `DIRECT_URL` | Optional unpooled PostgreSQL URL used by Prisma schema commands |
-| `JWT_SECRET` | Required; signs the `quorum_token` session cookie (at least 16 characters) |
-| `APP_URL` | Public origin, used in links |
-| `TRUST_PROXY` | Set to `1` only behind a trusted reverse proxy that overwrites forwarded headers |
-| `COOKIE_SECURE` | Optional `on`/`off`; otherwise follows the request protocol |
-| `AI_ENABLED` | Set to `off` to disable Gemini even when a key is configured |
-| `GEMINI_API_KEY`, `GEMINI_FLASH_API_KEY` | Server-side Gemini keys; either one can be used for both tiers |
-| `GEMINI_BASE_URL`, `GEMINI_FLASH_MODEL`, `GEMINI_FINAL_MODEL` | Optional API endpoint and tier models |
-| `GEMINI_CONCURRENCY`, `GEMINI_MAX_QUEUE`, `AI_MAX_CALLS_PER_ROOM` | AI queue and discussion-call limits |
-| `AI_WEIGHTS` | Three comma-separated weights for knowledge, participation, and thinking; default `40,25,35` |
-| `GEMINI_GROUNDING` | Optional Q&A search grounding; default `off` |
-| `REPORT_VISIBILITY` | Reserved report visibility setting; default `own` |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Password-reset and invite email. Empty SMTP shows the reset link on the page in development |
-| `LIVEKIT_HOST` | Media server HTTP address, default `http://127.0.0.1:7880` |
-| `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Must match the key pair passed to the media server |
-| `LIVEKIT_NODE_IP` | Address advertised to other devices. Blank uses the Wi-Fi address |
-| `LIVEKIT_URL` | Optional public WebSocket URL for browsers |
-| `LIVEKIT_BINARY` | Optional path to a LiveKit executable; otherwise `bin/livekit-server[.exe]` |
-| `STUN_URLS`, `TURN_URL`, `TURN_USERNAME`, `TURN_PASSWORD` | ICE servers. Google STUN is the default. TURN is needed only for strict firewalls |
-| `SEED_PARTICIPANT_EMAIL`, `SEED_PASSWORD` | Trusted seed account provisioning; use a unique password of at least 16 characters |
+| `DATABASE_URL` | PostgreSQL connection string (Neon, Supabase, Render, ...) |
+| `JWT_SECRET` | Random string of 16+ characters (use 32+); signs the session cookie |
+| `HOST_EMAIL`, `HOST_PASSWORD` | The one host account's sign-in. Password: 8 to 80 characters |
+| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | LiveKit project for video. Locally, `npm run setup` runs a local media server instead and generates the secret |
+
+**Optional** (sensible defaults are built in)
+
+| Variable | Purpose |
+| --- | --- |
+| `GEMINI_API_KEY` | Enables Gemini analysis; without it the heuristic scorer is used. `AI_ENABLED=off` forces it off |
+| `RUBRIC_WEIGHTS` | Five or six weights: topic relevance, communication, knowledge, participation, reasoning, listening. Default `25,20,20,15,10,10` |
+| `APP_URL` | Public origin for invite links. Derived from the request when unset |
+| `TRUST_PROXY=1`, `COOKIE_SECURE` | Needed only when running the bundled Node server behind a proxy such as Render |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Password-reset and invite email. Without SMTP, participants cannot reset a forgotten password by email |
+| `TURN_URL`, `TURN_USERNAME`, `TURN_PASSWORD`, `STUN_URLS` | ICE servers; Google STUN is the default |
+| `GEMINI_FLASH_API_KEY`, `GEMINI_BASE_URL`, `GEMINI_FLASH_MODEL`, `GEMINI_FINAL_MODEL`, `GEMINI_CONCURRENCY`, `GEMINI_MAX_QUEUE`, `GEMINI_GROUNDING`, `AI_MAX_CALLS_PER_ROOM`, `AI_WEIGHTS` | Advanced AI tuning |
+| `FFMPEG`, `STT_MODEL_DIR`, `PYTHON` | Recording transcription paths |
+| `LIVEKIT_HOST`, `LIVEKIT_NODE_IP`, `LIVEKIT_BINARY` | Local media server only |
+
+## Deploying
+
+**Sign-in, dashboards, and reports** run on any host. On Vercel, set the required variables, and the `vercel-build` script applies the database schema during each build (so `DATABASE_URL` must be reachable at build time; use your provider's direct connection string if a pooled one fails on `db push`). The host then signs in with `HOST_EMAIL` and `HOST_PASSWORD`.
+
+**Live meetings do not run on Vercel.** They need a long-running Node process for Socket.IO (`server/index.ts`), which Vercel's serverless functions cannot host. Deploy the app to Render with the included `render.yaml`, or any host that runs `npm run start:deploy`.
 
 Passwords are hashed with bcrypt (cost 12). Password-reset tokens last 30 minutes.
-
-## Deploying the web app to Vercel
-
-The app now uses PostgreSQL. Vercel functions need a persistent PostgreSQL database; Neon is supported:
-
-1. Set the Vercel project root directory to `AI_GD` and connect it to the intended GitHub repository and branch.
-2. Create a Neon database. Set `DATABASE_URL` to its pooled connection string and `DIRECT_URL` to its direct connection string in Vercel's environment settings. Also set a strong `JWT_SECRET` and the other required production secrets.
-3. Before the first deployment, run `npm run db:push:vercel` from `AI_GD` with those Neon URLs in the environment. This initializes the schema; do not commit either URL.
-4. Deploy with the standard `npm run build` command.
-
-The Vercel build does not automatically alter the database schema. After schema changes, run `npm run db:push:vercel` against the intended Neon database before deploying.
-
-Vercel does not run this project's custom Node server. The web/API routes can run there, but Socket.IO and the bundled LiveKit media server need a separate always-on server; see the self-hosted run instructions above.
 
 ## Layout
 

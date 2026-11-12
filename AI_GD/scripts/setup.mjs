@@ -25,8 +25,16 @@ function setSecret(name) {
 }
 
 setSecret("JWT_SECRET");
-setSecret("LIVEKIT_API_SECRET");
+// A local media server needs a generated secret; a hosted LiveKit project brings its own.
+if (!/^LIVEKIT_URL=["']?\S/m.test(env)) setSecret("LIVEKIT_API_SECRET");
 writeFileSync(envPath, env);
+
+const hostEmail = env.match(/^HOST_EMAIL=(.*)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "") || "";
+const hostPassword = env.match(/^HOST_PASSWORD=(.*)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "") || "";
+if (!hostEmail || hostPassword.length < 8) {
+  console.error("\nSet HOST_EMAIL and HOST_PASSWORD (at least 8 characters) in .env, then run `npm run setup` again.");
+  process.exit(1);
+}
 
 function runNpm(args) {
   const result = spawnSync("npm", args, {
@@ -39,7 +47,7 @@ function runNpm(args) {
 }
 
 runNpm(["run", "db:push"]);
-runNpm(["run", "seed"]);
+runNpm(["run", "seed"]); // creates the host from HOST_EMAIL / HOST_PASSWORD
 if (process.platform === "darwin") {
   console.log("LiveKit does not publish macOS server binaries. Start it with Docker; see README.md.");
 } else {

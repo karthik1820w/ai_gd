@@ -1,3 +1,4 @@
+import { livekitHttp } from "@/server/livekit";
 import { spawn, type ChildProcess } from "child_process";
 import { existsSync } from "fs";
 import path from "path";
@@ -39,7 +40,7 @@ export function resolveMediaBinary(
 async function mediaResponding() {
   if (mediaProbe) return mediaProbe;
   if (lastMediaProbe && Date.now() - lastMediaProbe.checkedAt < 3000) return lastMediaProbe.ready;
-  const host = (process.env.LIVEKIT_HOST || "http://127.0.0.1:7880").replace(/\/+$/, "");
+  const host = livekitHttp().replace(/\/+$/, "");
   mediaProbe = (async () => {
     try {
       const response = await fetch(`${host}/`, { signal: AbortSignal.timeout(1500) });

@@ -38,6 +38,7 @@ export async function PUT(request: Request) {
   if (blocked) return blocked;
   const { user, error } = await requireUser();
   if (!user) return error;
+  if (user.role === "HOST") return fail("The host password is set by HOST_PASSWORD in the server settings.", 403);
   const parsed = passwordSchema.safeParse(await readBody(request));
   if (!parsed.success) return fail("Enter your current password and a new one of at least 8 characters.");
   const stored = await prisma.user.findUnique({ where: { id: user.id } });
