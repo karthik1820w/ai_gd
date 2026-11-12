@@ -1,5 +1,5 @@
 # Render blueprint for Quorum. Live meetings need a long-running Node server
-# (Socket.IO), which Render provides and Vercel does not.
+# (Socket.IO), which Render provides.
 # Create a Blueprint instance from this repository, then fill in the variables marked
 # "sync: false" in the Render dashboard.
 services:

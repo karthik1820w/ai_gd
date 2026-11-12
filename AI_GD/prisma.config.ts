@@ -2,7 +2,7 @@ import "dotenv/config";
 import { defineConfig } from "prisma/config";
 
 // `prisma generate` runs on every `npm install` (postinstall) and never connects to the
-// database, so it must work without DATABASE_URL (CI, Vercel's install step, fresh clones).
+// database, so it must work without DATABASE_URL (CI and fresh clones).
 // Every command that does touch the database (db push, seed, studio) still requires a URL.
 const generatingOnly = process.argv.includes("generate");
 

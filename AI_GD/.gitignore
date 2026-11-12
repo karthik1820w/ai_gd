@@ -3,7 +3,6 @@ bin/
 models/
 dump.rdb
 .next
-.vercel
 data/
 data/recordings
 prisma/*.db

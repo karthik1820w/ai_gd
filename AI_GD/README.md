@@ -198,9 +198,9 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 
 ## Deploying
 
-**Sign-in, dashboards, and reports** run on any host. On Vercel, set the required variables, and the `vercel-build` script applies the database schema during each build (so `DATABASE_URL` must be reachable at build time; for Supabase use the **Session pooler** string, because the direct `db.<ref>.supabase.co` host is IPv6-only and Vercel cannot reach it; `DIRECT_URL` is an optional second string for schema pushes if `DATABASE_URL` is the transaction pooler on port 6543). Open `/api/health` on your deployment to see which setting is missing. The host then signs in with `HOST_EMAIL` and `HOST_PASSWORD`.
+The app is deployed on Render using the included `render.yaml` blueprint. Set the required environment variables in the Render dashboard. For Supabase, use the **Session pooler** connection string; `DIRECT_URL` is optional if `DATABASE_URL` uses the transaction pooler on port 6543. The start command applies the database schema before starting the app. Open `/api/health` on your deployment to check its configuration, then sign in with `HOST_EMAIL` and `HOST_PASSWORD`.
 
-**Live meetings do not run on Vercel.** They need a long-running Node process for Socket.IO (`server/index.ts`), which Vercel's serverless functions cannot host. Run the whole app on Render instead (this is what `render.yaml` is for), and keep Supabase as the database.
+Live meetings require a long-running Node process for Socket.IO (`server/index.ts`), provided by the Render web service.
 
 ### Run live meetings on Render + Supabase + LiveKit Cloud
 
