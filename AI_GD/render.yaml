@@ -1,6 +1,7 @@
-# Render blueprint for Quorum.
-# Create a Blueprint instance from this repository and Render provisions the
-# web service plus its PostgreSQL database, then wires DATABASE_URL for you.
+# Render blueprint for Quorum. Live meetings need a long-running Node server
+# (Socket.IO), which Render provides and Vercel does not.
+# Create a Blueprint instance from this repository, then fill in the variables marked
+# "sync: false" in the Render dashboard.
 services:
   - type: web
     name: quorum
@@ -15,10 +16,10 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22.20.0"
+      # Paste your Supabase "Session pooler" string (Connect -> Session pooler).
+      # Do not use the db.<ref>.supabase.co direct host: it is IPv6-only.
       - key: DATABASE_URL
-        fromDatabase:
-          name: quorum-db
-          property: connectionString
+        sync: false
       - key: JWT_SECRET
         generateValue: true
       # Behind Render's proxy these two are required, otherwise the app strips
@@ -42,9 +43,3 @@ services:
       # Optional: enables Gemini analysis instead of the heuristic fallback.
       - key: GEMINI_API_KEY
         sync: false
-
-databases:
-  - name: quorum-db
-    plan: free
-    databaseName: quorum
-    user: quorum

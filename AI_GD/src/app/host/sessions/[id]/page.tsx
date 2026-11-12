@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { readSession } from "@/lib/auth";
@@ -7,6 +8,9 @@ import { CopyLine } from "@/components/JoinForm";
 import { HostActions, HostFeedback } from "@/components/HostTools";
 import { ScoreChart } from "@/components/ReportView";
 import { readBrief } from "@/server/brief";
+import { TranscriptBlock } from "@/components/TranscriptBlock";
+import { filterBySpeaker } from "@/server/transcript";
+import { generateTranscript } from "@/server/transcriptStore";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +29,11 @@ export default async function HostSessionPage({ params }: { params: Promise<{ id
   });
   if (!discussion || discussion.hostId !== user.id) notFound();
   const code = discussion.accessCodes[0]?.code ?? "";
-  const origin = process.env.APP_URL || "http://localhost:3000";
+  const requestHeaders = await headers();
+  const forwardedHost = requestHeaders.get("x-forwarded-host") || requestHeaders.get("host");
+  const proto = requestHeaders.get("x-forwarded-proto")?.split(",")[0]?.trim() || (forwardedHost?.startsWith("localhost") ? "http" : "https");
+  const origin = (process.env.APP_URL?.trim() || (forwardedHost ? `${proto}://${forwardedHost}` : "http://localhost:3000")).replace(/\/+$/, "");
+  const transcript = discussion.status === "COMPLETED" ? await generateTranscript(discussion.id) : null;
   const guests = discussion.participants.filter((person) => person.userId !== user.id);
   const brief = await readBrief(discussion.aiBrief);
   return (
@@ -83,6 +91,14 @@ export default async function HostSessionPage({ params }: { params: Promise<{ id
               <p className="muted">{person.evaluation.source === "gemini" ? `Evaluated by Gemini${person.evaluation.model ? ` (${person.evaluation.model})` : ""}` : "Heuristic fallback used."}</p>
               <a href={`/api/discussions/${discussion.id}/pdf?type=INDIVIDUAL&participantId=${person.id}&download=1`}>Download individual PDF</a>
               {discussion.recordings.filter((recording) => recording.participantId === person.id).map((recording) => <p key={recording.id}><a href={`/api/recordings/${recording.id}`}>Microphone recording</a></p>)}
+              {person.evaluation.parameters.map((parameter) => (
+                <p key={parameter.id} style={{ margin: "4px 0" }}><strong>{parameter.label}</strong> ({Math.round(parameter.weight * 100)}%): {parameter.score == null ? "Not scored" : parameter.score.toFixed(0)}</p>
+              ))}
+              {transcript && <details style={{ margin: "8px 0" }}>
+                <summary>Transcript ({filterBySpeaker(transcript, person.id).totals.words} words)</summary>
+                <TranscriptBlock turns={filterBySpeaker(transcript, person.id).turns} />
+                <p><a href={`/api/discussions/${discussion.id}/transcript?format=txt&speaker=${person.id}&download=1`}>Download this person&apos;s transcript</a></p>
+              </details>}
               <HostFeedback discussionId={discussion.id} evaluationId={person.evaluation.id} />
             </section>
           ))}

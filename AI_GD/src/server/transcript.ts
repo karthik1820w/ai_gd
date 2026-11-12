@@ -276,6 +276,18 @@ export function formatSrt(doc: TranscriptDoc) {
     .join("\n");
 }
 
+/** The same transcript narrowed to one speaker (used for per-person views and exports). */
+export function filterBySpeaker(doc: TranscriptDoc, speakerId: string): TranscriptDoc {
+  const turns = doc.turns.filter((turn) => turn.speakerId === speakerId).map((turn, index) => ({ ...turn, index }));
+  const speakers = doc.speakers.filter((speaker) => speaker.speakerId === speakerId);
+  return {
+    ...doc,
+    turns,
+    speakers,
+    totals: { turns: turns.length, words: turns.reduce((sum, turn) => sum + turn.words, 0), speakingMs: speakers.reduce((sum, speaker) => sum + speaker.speakingMs, 0) },
+  };
+}
+
 export const TRANSCRIPT_FORMATS = ["txt", "md", "json", "srt"] as const;
 export type TranscriptFormat = (typeof TRANSCRIPT_FORMATS)[number];
 

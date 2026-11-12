@@ -4,6 +4,9 @@ import { prisma } from "@/lib/db";
 import { readSession } from "@/lib/auth";
 import { formatClock, formatWhen } from "@/lib/format";
 import { ScoreChart } from "@/components/ReportView";
+import { TranscriptBlock } from "@/components/TranscriptBlock";
+import { filterBySpeaker } from "@/server/transcript";
+import { generateTranscript } from "@/server/transcriptStore";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +21,8 @@ export default async function ParticipantReport({ params }: { params: Promise<{ 
   if (!participant) notFound();
   const evaluation = participant.evaluation;
   const shown = evaluation?.adjustedScore ?? evaluation?.overallScore;
+  const full = evaluation ? await generateTranscript(id) : null;
+  const mine = full ? filterBySpeaker(full, participant.id) : null;
   return (
     <>
       <p className="pill">{participant.discussion.topic}</p>
@@ -36,6 +41,11 @@ export default async function ParticipantReport({ params }: { params: Promise<{ 
           {evaluation.parameters.map((parameter) => (
             <p key={parameter.id}><strong>{parameter.label}</strong> ({Math.round(parameter.weight * 100)}%): {parameter.score == null ? "Not scored" : parameter.score.toFixed(0)}<br /><span className="muted">{parameter.explanation}</span></p>
           ))}
+          {mine && <>
+            <h2 className="serif">Your transcript</h2>
+            <p className="muted">What was captured from you, and what your scores were based on. {mine.totals.words} words in {mine.totals.turns} turns.</p>
+            <TranscriptBlock turns={mine.turns} />
+          </>}
           <h2 className="serif">Feedback</h2>
           {evaluation.notes.map((note) => <p key={note.id}><strong>{note.kind.toLowerCase()}: </strong>{note.body}</p>)}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

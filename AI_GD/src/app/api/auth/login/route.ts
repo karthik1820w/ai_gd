@@ -5,6 +5,7 @@ import { cookieOptions, safeNext, signSession } from "@/lib/auth";
 import { clientKey, fail, guardOrigin, json, loginRateLimitKeys, rateLimit, readBody } from "@/lib/http";
 import { hostPasswordMatches, isHostEmail, readHostConfig } from "@/lib/hostAccount";
 import { authorizedRole } from "@/lib/roles";
+import { describeDbError } from "@/lib/dbHints";
 import { loginSchema } from "@/lib/validators";
 import { provisionHost } from "@/server/hostProvision";
 
@@ -48,6 +49,6 @@ export async function POST(request: Request) {
   } catch (error) {
     // Usually an unreachable database or a schema that has not been pushed yet.
     console.error("Sign-in failed because of a server error.", error);
-    return fail("Sign-in is temporarily unavailable. The server could not reach its database.", 503);
+    return fail(`Sign-in is unavailable: ${describeDbError(error)}`, 503);
   }
 }

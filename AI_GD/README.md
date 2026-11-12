@@ -198,9 +198,21 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 
 ## Deploying
 
-**Sign-in, dashboards, and reports** run on any host. On Vercel, set the required variables, and the `vercel-build` script applies the database schema during each build (so `DATABASE_URL` must be reachable at build time; use your provider's direct connection string if a pooled one fails on `db push`). The host then signs in with `HOST_EMAIL` and `HOST_PASSWORD`.
+**Sign-in, dashboards, and reports** run on any host. On Vercel, set the required variables, and the `vercel-build` script applies the database schema during each build (so `DATABASE_URL` must be reachable at build time; for Supabase use the **Session pooler** string, because the direct `db.<ref>.supabase.co` host is IPv6-only and Vercel cannot reach it; `DIRECT_URL` is an optional second string for schema pushes if `DATABASE_URL` is the transaction pooler on port 6543). Open `/api/health` on your deployment to see which setting is missing. The host then signs in with `HOST_EMAIL` and `HOST_PASSWORD`.
 
-**Live meetings do not run on Vercel.** They need a long-running Node process for Socket.IO (`server/index.ts`), which Vercel's serverless functions cannot host. Deploy the app to Render with the included `render.yaml`, or any host that runs `npm run start:deploy`.
+**Live meetings do not run on Vercel.** They need a long-running Node process for Socket.IO (`server/index.ts`), which Vercel's serverless functions cannot host. Run the whole app on Render instead (this is what `render.yaml` is for), and keep Supabase as the database.
+
+### Run live meetings on Render + Supabase + LiveKit Cloud
+
+1. **LiveKit Cloud** (free tier): create a project at https://cloud.livekit.io and copy the WebSocket URL (`wss://...livekit.cloud`), API key and API secret.
+2. **Render**: New -> Blueprint -> pick this repository. If the project sits in a sub-folder of the repo, set **Root Directory** to that folder.
+3. In the Render dashboard set `DATABASE_URL` (Supabase **Session pooler** string), `HOST_EMAIL`, `HOST_PASSWORD`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and optionally `GEMINI_API_KEY`. `JWT_SECRET` is generated for you.
+4. Deploy. The start command applies the database schema, so no manual database step is needed. Open `https://<your-app>.onrender.com/api/health` to confirm `"ok": true`.
+5. Sign in as the host, create a discussion, and share the meeting link. Each participant joins from Chrome or Edge with microphone permission.
+
+How each person gets a transcript and a score: every browser transcribes its own microphone (Chrome/Edge speech recognition) and sends the lines to the server tagged with that person. When the host ends the discussion, the server builds each person's transcript and scores it on the six criteria. The host sees every person's transcript and criterion scores on the session page; each participant sees their own on their report.
+
+Limits to expect: Firefox and Safari have no speech recognition, so those people appear as Incomplete unless the optional recording transcription is set up (needs `ffmpeg` and Python, which Render's standard Node runtime does not include). Render's free plan sleeps after about 15 minutes idle, so open the app a minute before a session starts.
 
 Passwords are hashed with bcrypt (cost 12). Password-reset tokens last 30 minutes.
 
