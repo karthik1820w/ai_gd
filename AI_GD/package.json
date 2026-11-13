@@ -6,6 +6,7 @@
     "dev": "node --import tsx scripts/start-dev.mjs",
     "dev:https": "node --import tsx scripts/start-dev.mjs --https",
     "build": "next build",
+    "vercel-build": "prisma db push --skip-generate && next build",
     "start": "node --import tsx scripts/start-production.mjs",
     "start:deploy": "prisma db push --skip-generate && node --import tsx scripts/start-production.mjs",
     "fetch:livekit": "node scripts/fetch-livekit.mjs",

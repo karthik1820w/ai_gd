@@ -65,8 +65,8 @@ export function CreateDiscussionForm() {
       </div>
       <fieldset className="list" style={{ border: "1px solid var(--line)", borderRadius: 16, padding: 12 }}>
         <legend>Discussion mode</legend>
-        <label><input type="radio" name="mode" value="FREE_FLOW" defaultChecked /> Free-flow — people speak when they are ready</label>
-        <label><input type="radio" name="mode" value="AI_MODERATED" /> AI-moderated — quiet participants get a timed speaking turn</label>
+        <label><input type="radio" name="mode" value="FREE_FLOW" /> Free-flow — people speak when they are ready</label>
+        <label><input type="radio" name="mode" value="AI_MODERATED" defaultChecked /> AI-moderated (recommended) — when nobody speaks, the AI invites whoever has spoken least, and keeps asking until someone replies</label>
       </fieldset>
       <label><input type="checkbox" name="moderatorEnabled" defaultChecked /> AI moderator prompts</label>
       <label><input type="checkbox" name="transcriptionEnabled" defaultChecked /> Record a transcript and score it</label>

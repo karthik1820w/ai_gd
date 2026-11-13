@@ -9,6 +9,7 @@ import { HostActions, HostFeedback } from "@/components/HostTools";
 import { ScoreChart } from "@/components/ReportView";
 import { readBrief } from "@/server/brief";
 import { TranscriptBlock } from "@/components/TranscriptBlock";
+import { AutoRefresh } from "@/components/AutoRefresh";
 import { filterBySpeaker } from "@/server/transcript";
 import { generateTranscript } from "@/server/transcriptStore";
 
@@ -68,6 +69,7 @@ export default async function HostSessionPage({ params }: { params: Promise<{ id
           <p key={person.id}><strong>{person.displayName}</strong> <span className="muted">{person.user.email} · {formatClock(person.stat?.speakingMs ?? 0)} speaking · {person.stat?.contributionCount ?? 0} lines</span></p>
         ))}
       </section>
+      {discussion.status === "COMPLETED" && guests.some((person) => !person.evaluation) && <section className="card card-pad" style={{ marginBottom: 16 }}><AutoRefresh /><p className="muted">Scores are being prepared. This page updates by itself.</p></section>}
       {discussion.status === "COMPLETED" && (
         <>
           <section className="card card-pad" style={{ marginBottom: 16 }}>

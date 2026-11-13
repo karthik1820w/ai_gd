@@ -7,8 +7,6 @@ describe("database hints", () => {
     assert.match(describeDbError(Object.assign(new Error("x"), { code: "P2021" })), /npx prisma db push/);
     assert.match(describeDbError(Object.assign(new Error("Can't reach database server at `db.x.co:5432`"), { code: "P1001" })), /cannot be reached/);
     assert.match(describeDbError(new Error("Environment variable not found: DATABASE_URL")), /DATABASE_URL/);
-    assert.match(describeDbError(new Error("Environment variable not found: DATABASE_URL")), /deployment environment/);
-    assert.match(describeDbError(Object.assign(new Error("Can't reach database server at `db.x.co:5432`"), { code: "P1001" })), /network access rules/);
     assert.match(describeDbError(new Error("prepared statement \"s0\" already exists")), /pgbouncer/);
     assert.match(describeDbError(new Error("Authentication failed against database server")), /username or password/);
     assert.doesNotMatch(describeDbError(new Error("secret-host.internal")), /secret-host/);

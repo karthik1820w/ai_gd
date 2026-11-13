@@ -2,7 +2,8 @@ import { prisma } from "@/lib/db";
 import { aiEnabled, complete, parseJson } from "@/server/ai";
 import { aliasPeople, aliasText, deAlias, MODERATOR_SCHEMA, taskPrompt, type AliasEntry } from "@/server/aiPrompts";
 import { markLive, recordInvite, rememberPrompt, room, snapshot } from "@/server/activity";
-import { emitDiscussion } from "@/server/realtime";
+import { emitDiscussion, emitUser } from "@/server/realtime";
+import { FIRST_INVITE_AFTER_MS, INVITE_AFTER_MS } from "@/lib/floor";
 import { endDiscussion } from "@/server/evaluate";
 import { pickNextSpeaker } from "@/server/fairTurn";
 import { logEvent } from "@/server/journal";
@@ -82,7 +83,7 @@ export async function moderateLive() {
     if (discussion.startedAt && discussion.retentionDays == null) {
       const ends = discussion.startedAt.getTime() + discussion.durationMin * 60_000 + 2 * 60_000;
       if (now > ends) {
-        await endDiscussion(discussion.id);
+        await endDiscussion(discussion.id, { background: true });
         continue;
       }
     }
@@ -124,8 +125,11 @@ export async function moderateLive() {
 
     const quietFor = now - live.lastSpeechAt;
 
-    // Mathematical Fair-Turn moderation: ensures equitable speaking opportunities
-    if (discussion.mode === "AI_MODERATED" && elapsed > durationMs * 0.1 && quietFor > 8_000) {
+    // Fair-turn moderation. When nobody has spoken for a few seconds the moderator invites
+    // the connected person who has taken part least (raised hands first). Only one invitation is
+    // open at a time; if it times out unanswered, the next-quietest person is asked, and so on
+    // until somebody responds.
+    if (discussion.mode === "AI_MODERATED" && elapsed > FIRST_INVITE_AFTER_MS && quietFor > INVITE_AFTER_MS && live.invites.size === 0) {
       const candidates = active
         .filter((p) => p.userId !== discussion.hostId && live.presence?.get(p.userId)?.connected)
         .map((p) => ({
@@ -138,8 +142,9 @@ export async function moderateLive() {
           online: Boolean(live.presence?.get(p.userId)?.connected),
         }));
 
-      const nextSpeaker = pickNextSpeaker(candidates);
-      if (nextSpeaker && !live.invites.has(nextSpeaker.id) && now - live.lastPromptAt > 15_000) {
+      const handsUp = candidates.filter((candidate) => live.presence.get(candidate.id)?.hand);
+      const nextSpeaker = pickNextSpeaker(handsUp.length ? handsUp : candidates);
+      if (nextSpeaker && now - live.lastPromptAt > 10_000) {
         const candidateParticipant = active.find((p) => p.userId === nextSpeaker.id);
         if (candidateParticipant) {
           const seconds = discussion.speakingTimeSec;
@@ -216,33 +221,48 @@ async function emitRoster(discussionId: string) {
   });
   if (!discussion) return;
   const live = snapshot(discussionId);
-  const roster = discussion.participants
-    .filter((participant) => !participant.removed)
-    .map((participant) => {
-      const presence = live?.presence.get(participant.userId);
-      return {
-        participantId: participant.id,
-        userId: participant.userId,
-        name: participant.displayName,
-        isHost: participant.userId === discussion.hostId,
-        connected: Boolean(presence),
-        audio: presence?.audio ?? false,
-        video: presence?.video ?? false,
-        hand: presence?.hand ?? false,
-        screen: presence?.screen ?? false,
-        speaking: live?.speaking.has(participant.userId) ?? false,
-        micLocked: participant.micLocked,
-        speakingMs: participant.stat?.speakingMs ?? 0,
-        contributions: participant.stat?.contributionCount ?? 0,
-        relevant: participant.stat?.relevantCount ?? 0,
-        irrelevant: participant.stat?.irrelevantCount ?? 0,
-        missed: participant.stat?.missedOpportunities ?? 0,
-        technical: participant.technical.length,
-        q: live?.netMeters?.get(participant.userId)?.level ?? "good",
-      };
-    });
-  emitDiscussion(discussionId, "roster", roster);
+  const people = discussion.participants.filter((participant) => !participant.removed);
+  const entry = (participant: (typeof people)[number]) => {
+    const presence = live?.presence.get(participant.userId);
+    return {
+      participantId: participant.id,
+      userId: participant.userId,
+      name: participant.displayName,
+      isHost: participant.userId === discussion.hostId,
+      connected: Boolean(presence),
+      audio: presence?.audio ?? false,
+      video: presence?.video ?? false,
+      hand: presence?.hand ?? false,
+      screen: presence?.screen ?? false,
+      speaking: live?.speaking.has(participant.userId) ?? false,
+      micLocked: participant.micLocked,
+      speakingMs: participant.stat?.speakingMs ?? 0,
+      contributions: participant.stat?.contributionCount ?? 0,
+      invites: live?.invitesCount.get(participant.userId) ?? 0,
+      q: live?.netMeters?.get(participant.userId)?.level ?? "good",
+    };
+  };
+  // Everyone sees who is in the room and how long each person has talked. Only the host also
+  // receives how each contribution was judged, because those are the participants' scores.
+  emitDiscussion(discussionId, "roster", people.map(entry));
+  emitUser(discussion.hostId, "roster-admin", people.map((participant) => ({
+    ...entry(participant),
+    relevant: participant.stat?.relevantCount ?? 0,
+    irrelevant: participant.stat?.irrelevantCount ?? 0,
+    missed: participant.stat?.missedOpportunities ?? 0,
+    technical: participant.technical.length,
+  })));
+  const open = live ? [...live.invites.entries()][0] : undefined;
+  emitDiscussion(discussionId, "floor", {
+    serverNow: Date.now(),
+    lastSpeechAt: live?.lastSpeechAt ?? Date.now(),
+    inviteAfterMs: INVITE_AFTER_MS,
+    moderated: discussion.moderatorEnabled && discussion.mode === "AI_MODERATED",
+    invite: open ? { userId: open[0], until: open[1].until } : null,
+  });
 }
+
+const rosterTimers = new Map<string, NodeJS.Timeout>();
 
 async function purgeExpired() {
   const candidates = await prisma.discussion.findMany({
@@ -262,6 +282,11 @@ async function purgeExpired() {
   }
 }
 
-export async function publishRoster(discussionId: string) {
-  await emitRoster(discussionId);
+/** Roster changes come in bursts (join, mute, connection notes), so they are sent once per short window. */
+export function publishRoster(discussionId: string) {
+  if (rosterTimers.has(discussionId)) return;
+  rosterTimers.set(discussionId, setTimeout(() => {
+    rosterTimers.delete(discussionId);
+    emitRoster(discussionId).catch((error) => console.error("Could not publish the roster.", error));
+  }, 250));
 }

@@ -475,7 +475,35 @@ export async function evaluateDiscussion(discussionId: string) {
   return summaryBody;
 }
 
-export async function endDiscussion(discussionId: string) {
+const evaluations = new Map<string, Promise<void>>();
+
+/** Scoring, run once at a time per discussion, then announced to the room. */
+function runEvaluation(discussionId: string) {
+  const running = evaluations.get(discussionId);
+  if (running) return running;
+  const job = (async () => {
+    let summaryError: string | null = null;
+    let summary: Awaited<ReturnType<typeof evaluateDiscussion>> = null;
+    try {
+      summary = await evaluateDiscussion(discussionId);
+    } catch (error) {
+      console.error(error);
+      summaryError = "The discussion ended, but the report could not be finished. Open the session and recalculate.";
+    }
+    finalizeJournal(discussionId, { status: "COMPLETED", endedAt: new Date().toISOString(), summary, summaryError });
+    emitDiscussion(discussionId, "report-ready", { summaryError });
+  })().finally(() => evaluations.delete(discussionId));
+  evaluations.set(discussionId, job);
+  return job;
+}
+
+/**
+ * Ends a discussion. The room is told straight away; scoring (which can wait on
+ * AI analysis) follows. With `background: true` this returns as soon as the room
+ * is closed and a "report-ready" event is sent when the scores exist. Without it,
+ * the caller waits for the scores, as the host's REST button does.
+ */
+export async function endDiscussion(discussionId: string, options: { background?: boolean } = {}) {
   const existing = await prisma.discussion.findUnique({ where: { id: discussionId } });
   if (!existing || existing.status === "CANCELLED") return { ok: false as const, error: "This discussion cannot be ended." };
   if (existing.status !== "COMPLETED") {
@@ -485,26 +513,13 @@ export async function endDiscussion(discussionId: string) {
     });
   }
   await expireInvites(discussionId);
-  let summaryError: string | null = null;
-  let summary: Awaited<ReturnType<typeof evaluateDiscussion>> = null;
-  try {
-    summary = await evaluateDiscussion(discussionId);
-  } catch (error) {
-    console.error(error);
-    summaryError = "The discussion ended, but the report could not be finished. Open the session and recalculate.";
-  }
   dropRoom(discussionId);
-  finalizeJournal(discussionId, {
-    status: "COMPLETED",
-    endedAt: new Date().toISOString(),
-    summary,
-    summaryError,
-  });
-  emitDiscussion(discussionId, "meeting-ended", {
-    summary,
-    summaryError,
-  });
-  return { ok: true as const, summary, summaryError };
+  emitDiscussion(discussionId, "meeting-ended", { preparing: true });
+  const job = runEvaluation(discussionId);
+  if (options.background) return { ok: true as const, summary: null, summaryError: null as string | null, background: true as const };
+  await job;
+  const summary = await prisma.discussionSummary.findUnique({ where: { discussionId }, include: { points: true } });
+  return { ok: true as const, summary, summaryError: null as string | null, background: false as const };
 }
 
 async function expireInvites(discussionId: string) {

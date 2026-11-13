@@ -44,6 +44,7 @@ export default async function MeetingPage({ params, searchParams }: { params: Pr
         aiEnabled: aiEnabled(),
         brief,
         isHost,
+        roomCode: isHost ? active : undefined,
         displayName: membership?.displayName || user.name,
       }}
     />

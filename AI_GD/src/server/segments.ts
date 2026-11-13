@@ -4,7 +4,7 @@ import { aiEnabled, complete, parseJson } from "@/server/ai";
 import { aliasPeople, aliasText, taskPrompt, UTTERANCE_SCHEMA, type Aliases } from "@/server/aiPrompts";
 import { readBrief } from "@/server/brief";
 import { noteSpeech } from "@/server/activity";
-import { emitDiscussion, emitUser } from "@/server/realtime";
+import { emitUser } from "@/server/realtime";
 import { aiWeights, scoreAIPillars } from "@/server/aiScoring";
 import { computeRubric, parseRubricWeights } from "@/server/rubric";
 import { classifyStatement, scoreParticipant, type Classification, type PriorLine, type RelevanceLabel, wordCount } from "@/server/scoring";
@@ -21,6 +21,29 @@ export async function waitForPendingAnalysis(discussionId: string, timeoutMs: nu
       resolve();
     });
   });
+}
+
+/**
+ * Transcript lines are private to their speaker and the host. They are sent to
+ * those two users only, never to the whole room.
+ */
+export function emitSegment(hostId: string, ownerUserId: string, dto: SegmentDTO) {
+  emitUser(hostId, "segment", dto);
+  if (ownerUserId !== hostId) emitUser(ownerUserId, "segment", dto);
+}
+
+const scoreTimers = new Map<string, NodeJS.Timeout>();
+
+/**
+ * Scoring a whole discussion is the most expensive step of a transcript line, so
+ * bursts of lines share one recalculation instead of each triggering their own.
+ */
+export function scheduleLiveScores(discussionId: string, delayMs = 1200) {
+  if (scoreTimers.has(discussionId)) return;
+  scoreTimers.set(discussionId, setTimeout(() => {
+    scoreTimers.delete(discussionId);
+    publishLiveScores(discussionId).catch((error) => console.error("Could not publish live scores.", error));
+  }, delayMs));
 }
 
 export type SegmentDTO = {
@@ -208,23 +231,24 @@ export async function addSegment(input: { discussionId: string; userId: string; 
   if (words < 2 && !/^(yes|no|agree|disagree)$/i.test(text)) return null;
   if (text.length > 2000) return null;
 
-  const discussion = await prisma.discussion.findUnique({
-    where: { id: input.discussionId },
-    include: { transcript: true, participants: { select: { userId: true, displayName: true } } },
-  });
+  const [discussion, participant, recent] = await Promise.all([
+    prisma.discussion.findUnique({
+      where: { id: input.discussionId },
+      include: { transcript: true, participants: { select: { userId: true, displayName: true } } },
+    }),
+    prisma.discussionParticipant.findUnique({
+      where: { discussionId_userId: { discussionId: input.discussionId, userId: input.userId } },
+    }),
+    prisma.transcriptSegment.findMany({
+      where: { discussionId: input.discussionId },
+      orderBy: { startedAt: "desc" },
+      take: 12,
+      include: { participant: true },
+    }),
+  ]);
   if (!discussion || discussion.status === "COMPLETED" || discussion.status === "CANCELLED") return null;
   if (!discussion.transcriptionEnabled || discussion.transcriptsPurgedAt) return null;
-  const participant = await prisma.discussionParticipant.findUnique({
-    where: { discussionId_userId: { discussionId: discussion.id, userId: input.userId } },
-  });
   if (!participant || participant.removed || !participant.transcriptionConsent) return null;
-
-  const recent = await prisma.transcriptSegment.findMany({
-    where: { discussionId: discussion.id },
-    orderBy: { startedAt: "desc" },
-    take: 12,
-    include: { participant: true },
-  });
   const duplicate = recent.find((segment) => segment.participantId === participant.id && segment.text.toLowerCase() === text.toLowerCase() && Date.now() - segment.createdAt.getTime() < 8000);
   if (duplicate) return segmentDTO(duplicate);
 
@@ -276,15 +300,15 @@ export async function addSegment(input: { discussionId: string; userId: string; 
     },
     include: { participant: true },
   });
-  await prisma.speakingStat.upsert({
+  noteSpeech(discussion.id, input.userId);
+  emitSegment(discussion.hostId, input.userId, segmentDTO(created));
+  void prisma.speakingStat.upsert({
     where: { participantId: participant.id },
     create: { participantId: participant.id, contributionCount: 1 },
     update: { contributionCount: { increment: 1 } },
-  });
-  noteSpeech(discussion.id, input.userId);
-  emitDiscussion(discussion.id, "segment", segmentDTO(created));
+  }).catch((error) => console.error("Could not update speaking stats.", error));
 
-  const pending = finishAnalysis(created.id, {
+  const pending = finishAnalysis(created.id, discussion.hostId, {
     topic: discussion.topic,
     description: discussion.description,
     context: discussion.context,
@@ -307,7 +331,7 @@ export async function addSegment(input: { discussionId: string; userId: string; 
   return segmentDTO(created);
 }
 
-async function finishAnalysis(segmentId: string, input: Parameters<typeof modelClassification>[0]) {
+async function finishAnalysis(segmentId: string, hostId: string, input: Parameters<typeof modelClassification>[0]) {
   const result = await modelClassification(input);
   const { classification, source } = result;
   const updated = await prisma.transcriptSegment.update({
@@ -347,8 +371,8 @@ async function finishAnalysis(segmentId: string, input: Parameters<typeof modelC
       },
     });
   }
-  emitDiscussion(updated.discussionId, "segment", segmentDTO(updated));
-  await publishLiveScores(updated.discussionId);
+  emitSegment(hostId, updated.participant.userId, segmentDTO(updated));
+  scheduleLiveScores(updated.discussionId);
   if (source === "gemini" && result.accuracy === "inaccurate" && result.correction) {
     const note = {
       name: updated.participant.displayName,
@@ -356,8 +380,7 @@ async function finishAnalysis(segmentId: string, input: Parameters<typeof modelC
       speakerId: updated.participant.userId,
     };
     emitUser(updated.participant.userId, "ai-note", note);
-    const host = await prisma.discussion.findUnique({ where: { id: updated.discussionId }, select: { hostId: true } });
-    if (host && host.hostId !== updated.participant.userId) emitUser(host.hostId, "ai-note", note);
+    if (hostId !== updated.participant.userId) emitUser(hostId, "ai-note", note);
   }
 }
 

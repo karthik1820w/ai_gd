@@ -15,6 +15,6 @@ export async function GET() {
     return json({ ok: missing.length === 0, database: "ok", settings, hint: missing.length ? `Missing settings: ${missing.join(", ")}.` : undefined, ai: aiEnabled() }, missing.length ? 503 : 200);
   } catch (error) {
     console.error("Health check failed.", error);
-    return json({ ok: false, database: "failed", settings, hint: missing.includes("DATABASE_URL") ? "DATABASE_URL is not set in the deployment environment. Add it and redeploy." : describeDbError(error) }, 503);
+    return json({ ok: false, database: "failed", settings, hint: missing.includes("DATABASE_URL") ? "DATABASE_URL is not set in Vercel. Add it and redeploy." : describeDbError(error) }, 503);
   }
 }

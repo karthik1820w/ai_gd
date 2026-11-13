@@ -61,7 +61,7 @@ export async function renderReport(input: { discussionId: string; type: string; 
   const mine = discussion.participants.find((participant) => participant.userId === input.requesterId);
   if (!isHost && !mine) return { error: "You cannot open this report.", status: 403 as const };
   if (!isHost && (input.type === "COMBINED" || input.type === "SUMMARY")) {
-    return { error: "Participants can download their own report and the shared transcript.", status: 403 as const };
+    return { error: "Participants can download their own report and their own transcript.", status: 403 as const };
   }
   if (!isHost && input.type === "INDIVIDUAL" && input.participantId && input.participantId !== mine?.id) {
     return { error: "You can download only your own report.", status: 403 as const };
@@ -70,6 +70,8 @@ export async function renderReport(input: { discussionId: string; type: string; 
     return { error: "The transcript was deleted under this session's retention setting.", status: 410 as const };
   }
 
+  // A participant's transcript PDF contains only their own lines.
+  if (!isHost && input.type === "TRANSCRIPT" && mine) discussion.segments = discussion.segments.filter((segment) => segment.participantId === mine.id);
   const doc = new PDFDocument({ size: "A4", margin: 48, bufferPages: true });
   const done = collect(doc);
   const when = new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(discussion.startedAt ?? discussion.scheduledAt);

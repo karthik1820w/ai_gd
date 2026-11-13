@@ -13,11 +13,12 @@ export async function startDiscussion(discussionId: string) {
   });
   markLive(discussionId);
   emitDiscussion(discussionId, "session-live", { startedAt: updated.startedAt?.toISOString() ?? null });
-  await notifyDiscussion(discussionId, {
+  // Notifications are a courtesy; starting must not wait for one row per participant.
+  void notifyDiscussion(discussionId, {
     type: "STARTED",
     title: "Discussion is live",
     body: `${updated.title} has started.`,
     href: `/meeting/${updated.meetingId}`,
-  });
+  }).catch((error) => console.error("Could not send start notifications.", error));
   return updated;
 }

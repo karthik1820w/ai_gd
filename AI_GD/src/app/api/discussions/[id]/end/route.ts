@@ -11,7 +11,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   const { id } = await context.params;
   const discussion = await prisma.discussion.findUnique({ where: { id } });
   if (!discussion || discussion.hostId !== user.id) return fail("Discussion not found.", 404);
-  const result = await endDiscussion(id);
+  // Close the room now; scoring (which may wait on AI analysis) finishes in the background.
+  const result = await endDiscussion(id, { background: true });
   if (!result.ok) return fail(result.error, 409);
-  return json({ ok: true, summaryError: result.summaryError });
+  return json({ ok: true, preparing: true });
 }

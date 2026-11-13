@@ -6,17 +6,18 @@ import { generateTranscript } from "@/server/transcriptStore";
 import { transcribeRecordings } from "@/server/transcribeRecordings";
 
 /**
- * GET  ?format=txt|md|json|srt[&speaker=<participantId>]  Generated transcript (host and joined participants; scores are never included).
+ * GET  ?format=txt|md|json|srt[&speaker=<participantId>]  Host: everyone (or one person). Participant: their own lines only. Scores are never included.
  * POST                           Host only: fill gaps from stored recordings, then recalculate scores separately.
  */
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   const { user, error } = await requireUser();
   if (!user) return error;
   const { id } = await context.params;
-  const discussion = await prisma.discussion.findUnique({ where: { id }, include: { participants: { select: { userId: true } } } });
+  const discussion = await prisma.discussion.findUnique({ where: { id }, include: { participants: { select: { id: true, userId: true, removed: true } } } });
   if (!discussion) return fail("Discussion not found.", 404);
-  const allowed = discussion.hostId === user.id || discussion.participants.some((participant) => participant.userId === user.id);
-  if (!allowed) return fail("You cannot view this transcript.", 403);
+  const isHost = discussion.hostId === user.id;
+  const mine = discussion.participants.find((participant) => participant.userId === user.id && !participant.removed);
+  if (!isHost && !mine) return fail("You cannot view this transcript.", 403);
   if (discussion.transcriptsPurgedAt) return fail("The transcript was deleted under this session's retention setting.", 410);
 
   const url = new URL(request.url);
@@ -24,7 +25,8 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   if (!TRANSCRIPT_FORMATS.includes(format)) return fail(`Format must be one of: ${TRANSCRIPT_FORMATS.join(", ")}.`);
   const full = await generateTranscript(id);
   if (!full) return fail("Discussion not found.", 404);
-  const speaker = url.searchParams.get("speaker");
+  // The host can read everyone, or one person. A participant always gets only their own lines.
+  const speaker = isHost ? url.searchParams.get("speaker") : mine!.id;
   const doc = speaker ? filterBySpeaker(full, speaker) : full;
   const rendered = renderTranscript(doc, format);
   const safe = discussion.title.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 60) || "discussion";

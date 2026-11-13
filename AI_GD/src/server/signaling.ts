@@ -9,13 +9,14 @@ import {
   sampleNetQuality,
   setPresence,
   setSpeaking,
+  noteSpeech,
 } from "@/server/activity";
 import { endDiscussion } from "@/server/evaluate";
 import { muteLivekitAudio, removeLivekitParticipant } from "@/server/livekit";
 import { startDiscussion } from "@/server/live";
 import { publishRoster } from "@/server/moderator";
 import { emitDiscussion } from "@/server/realtime";
-import { addSegment, publishLiveScores, segmentDTO } from "@/server/segments";
+import { addSegment, scheduleLiveScores, segmentDTO } from "@/server/segments";
 import { tokenFromCookie, verifyToken, type TokenUser } from "@/server/token";
 import { createBucket, createRealtimeBuckets, take } from "@/server/rateLimit";
 import { NOTICE } from "@/server/netQuality";
@@ -29,6 +30,7 @@ declare module "socket.io" {
     user: TokenUser;
     discussionId?: string;
     name?: string;
+    participantId?: string;
     lastPingAt?: number;
   }
 }
@@ -74,9 +76,11 @@ export function attachSignaling(io: Server) {
 
       logEvent(access.discussion.id, "watch", { userId: user.id, name: user.name });
 
+      // Transcript lines are private: a participant gets only their own, the host gets everyone's.
+      const ownRow = access.isHost ? null : await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId: access.discussion.id, userId: user.id } }, select: { id: true } });
       const [segments, messages, events] = await Promise.all([
         prisma.transcriptSegment.findMany({
-          where: { discussionId: access.discussion.id },
+          where: access.isHost ? { discussionId: access.discussion.id } : { discussionId: access.discussion.id, participantId: ownRow?.id ?? "none" },
           orderBy: { startedAt: "asc" },
           take: 300,
           include: { participant: true },
@@ -106,8 +110,8 @@ export function attachSignaling(io: Server) {
       socket.emit("transcript-history", segments.map(segmentDTO));
       socket.emit("chat-history", messages.map((message) => ({ id: message.id, userId: message.userId, name: message.name, text: message.text, createdAt: message.createdAt.toISOString() })));
       socket.emit("moderator-history", events.reverse().map((event) => ({ id: event.id, situation: event.situation, message: event.message, source: event.source, targetUserId: event.targetUserId, createdAt: event.createdAt.toISOString() })));
-      await publishRoster(access.discussion.id);
-      await publishLiveScores(access.discussion.id);
+      publishRoster(access.discussion.id);
+      scheduleLiveScores(access.discussion.id, 300);
     });
 
     socket.on("join-media", async (payload: { audio?: boolean; video?: boolean; hand?: boolean; speechAvailable?: boolean }) => {
@@ -115,7 +119,10 @@ export function attachSignaling(io: Server) {
       const discussionId = socket.data.discussionId;
       const user = socket.data.user;
       if (!discussionId || !user) return;
-      const discussion = await prisma.discussion.findUnique({ where: { id: discussionId } });
+      const [discussion, participant] = await Promise.all([
+        prisma.discussion.findUnique({ where: { id: discussionId } }),
+        prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId, userId: user.id } } }),
+      ]);
       if (!discussion || discussion.status === "COMPLETED" || discussion.status === "CANCELLED") {
         socket.emit("room-error", { error: "This discussion has ended." });
         return;
@@ -126,33 +133,18 @@ export function attachSignaling(io: Server) {
         return;
       }
       if (isHost && discussion.status === "SCHEDULED") await startDiscussion(discussion.id);
-      const participant = await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId, userId: user.id } } });
       if (!participant || participant.removed) {
         socket.emit("room-error", { error: "Join the discussion from the lobby before turning media on." });
         return;
       }
       socket.data.name = participant.displayName;
+      socket.data.participantId = participant.id;
       const existing = room(discussionId).presence.get(user.id);
       if (existing && existing.socketId !== socket.id) {
         io.to(existing.socketId).emit("replaced");
         io.sockets.sockets.get(existing.socketId)?.disconnect(true);
       }
-      await prisma.discussionParticipant.update({
-        where: { id: participant.id },
-        data: {
-          joinedAt: participant.joinedAt ?? new Date(),
-          leftAt: null,
-          mediaReady: Boolean(payload.audio),
-          speechAvailable: payload.speechAvailable !== false,
-        },
-      });
-      await prisma.speakingStat.upsert({ where: { participantId: participant.id }, create: { participantId: participant.id }, update: {} });
-
-      logEvent(discussionId, "join", { id: participant.id, userId: user.id, name: participant.displayName });
-
-      const others = [...room(discussionId).presence.entries()]
-        .filter(([userId]) => userId !== user.id)
-        .map(([userId, media]) => ({ socketId: media.socketId, userId, name: findName(discussionId, userId) }));
+      // Presence first, so everyone sees the person arrive; the database catches up alongside.
       setPresence(discussionId, user.id, {
         socketId: socket.id,
         audio: Boolean(payload.audio),
@@ -161,9 +153,20 @@ export function attachSignaling(io: Server) {
         screen: false,
         connected: true,
       });
-      socket.emit("peers", await namedPeers(discussionId, others));
-      socket.to(`discussion:${discussionId}`).emit("peer-joined", { socketId: socket.id, userId: user.id, name: participant.displayName });
-      await publishRoster(discussionId);
+      publishRoster(discussionId);
+      logEvent(discussionId, "join", { id: participant.id, userId: user.id, name: participant.displayName });
+      await Promise.all([
+        prisma.discussionParticipant.update({
+          where: { id: participant.id },
+          data: {
+            joinedAt: participant.joinedAt ?? new Date(),
+            leftAt: null,
+            mediaReady: Boolean(payload.audio),
+            speechAvailable: payload.speechAvailable !== false,
+          },
+        }),
+        prisma.speakingStat.upsert({ where: { participantId: participant.id }, create: { participantId: participant.id }, update: {} }),
+      ]);
     });
 
     socket.on("signal", (payload: { to?: string; data?: unknown }) => {
@@ -203,17 +206,30 @@ export function attachSignaling(io: Server) {
 
       logEvent(discussionId, "speaking", { userId, speaking });
 
+      // Tell the room first; the stat write is bookkeeping and must not delay the highlight.
+      emitDiscussion(discussionId, "speaking", { userId, speaking });
       if (speaking && acceptSpeakingTick(discussionId, userId)) {
-        const participant = await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId, userId } } });
-        if (participant) {
-          await prisma.speakingStat.upsert({
-            where: { participantId: participant.id },
-            create: { participantId: participant.id, speakingMs: 1000 },
+        const participantId = socket.data.participantId
+          ?? (await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId, userId } }, select: { id: true } }))?.id;
+        if (participantId) {
+          socket.data.participantId = participantId;
+          void prisma.speakingStat.upsert({
+            where: { participantId },
+            create: { participantId, speakingMs: 1000 },
             update: { speakingMs: { increment: 1000 } },
-          });
+          }).catch((error) => console.error("Could not update speaking time.", error));
         }
       }
-      emitDiscussion(discussionId, "speaking", { userId, speaking });
+    });
+
+    // "Speak": the person accepts the floor. It answers an open invitation straight away,
+    // without waiting for their voice to be detected.
+    socket.on("take-floor", () => {
+      if (!allowEvent(1)) return;
+      const discussionId = socket.data.discussionId;
+      if (!discussionId) return;
+      noteSpeech(discussionId, socket.data.user.id);
+      publishRoster(discussionId);
     });
 
     socket.on("transcript", async (payload: { text?: string; startedAt?: string; endedAt?: string }) => {
@@ -318,7 +334,7 @@ export function attachSignaling(io: Server) {
           level: newLevel,
           text: NOTICE[newLevel],
         });
-        await publishRoster(discussionId);
+        publishRoster(discussionId);
       }
     });
 
@@ -352,7 +368,7 @@ export function attachSignaling(io: Server) {
       const presence = room(discussion.id).presence.get(payload.userId);
       if (presence) io.to(presence.socketId).emit("force-mute", { locked: Boolean(payload.locked) });
       logEvent(discussion.id, "host-mute", { targetUserId: payload.userId, locked: Boolean(payload.locked) });
-      await publishRoster(discussion.id);
+      publishRoster(discussion.id);
     });
 
     socket.on("host-remove", async (payload: { userId?: string }) => {
@@ -367,7 +383,7 @@ export function attachSignaling(io: Server) {
         io.sockets.sockets.get(presence.socketId)?.disconnect(true);
       }
       logEvent(discussion.id, "host-remove", { targetUserId: payload.userId });
-      await publishRoster(discussion.id);
+      publishRoster(discussion.id);
     });
 
     socket.on("end-meeting", async () => {
@@ -375,7 +391,7 @@ export function attachSignaling(io: Server) {
       const discussion = await hostDiscussion(socket);
       if (!discussion) return;
       logEvent(discussion.id, "end");
-      await endDiscussion(discussion.id);
+      await endDiscussion(discussion.id, { background: true });
     });
 
     socket.on("leave", () => leave(socket));
@@ -393,16 +409,6 @@ async function hostDiscussion(socket: { data: { user: TokenUser; discussionId?: 
   return discussion;
 }
 
-function findName(discussionId: string, userId: string) {
-  return userId || discussionId;
-}
-
-async function namedPeers(discussionId: string, peers: Array<{ socketId: string; userId: string; name: string }>) {
-  const participants = await prisma.discussionParticipant.findMany({ where: { discussionId, userId: { in: peers.map((peer) => peer.userId) } } });
-  const names = new Map(participants.map((participant) => [participant.userId, participant.displayName]));
-  return peers.map((peer) => ({ ...peer, name: names.get(peer.userId) || peer.name }));
-}
-
 async function leave(socket: { id: string; data: { user?: TokenUser; discussionId?: string }; to: (room: string) => { emit: (event: string, payload: unknown) => void } }) {
   const discussionId = socket.data.discussionId;
   const user = socket.data.user;
@@ -410,8 +416,7 @@ async function leave(socket: { id: string; data: { user?: TokenUser; discussionI
   clearPresence(discussionId, user.id, socket.id);
   logEvent(discussionId, "leave", { userId: user.id });
   socket.to(`discussion:${discussionId}`).emit("peer-left", { socketId: socket.id, userId: user.id });
-  const participant = await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId, userId: user.id } } });
-  if (participant) await prisma.discussionParticipant.update({ where: { id: participant.id }, data: { leftAt: new Date() } });
-  await publishRoster(discussionId);
   socket.data.discussionId = undefined;
+  publishRoster(discussionId);
+  await prisma.discussionParticipant.updateMany({ where: { discussionId, userId: user.id }, data: { leftAt: new Date() } }).catch(() => undefined);
 }

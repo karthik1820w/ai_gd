@@ -18,7 +18,7 @@ Each account has one role.
 **Participant**
 
 - Joins with a link or a meeting ID plus access code.
-- Sees only their own evaluation and the shared transcript.
+- Sees only their own score and their own transcript. Nobody else's words or scores are ever sent to them.
 - Cannot open another person's score, the combined scores PDF, or the group summary PDF. Those requests return 403.
 - Cannot use host actions.
 
@@ -57,7 +57,7 @@ Set `RUBRIC_WEIGHTS` to change them (see Environment). Five numbers (`25,20,20,1
 Live lines are captured in each browser (Web Speech API) and stored per speaker. The generator then builds the transcript used for scoring and export:
 
 - **Merge.** Same-speaker fragments less than 4 seconds apart become one turn, ordered by time, with offsets from the start of the discussion.
-- **Export.** `GET /api/discussions/:id/transcript?format=txt|md|json|srt` (add `&download=1` to save). The host and joined participants can read it; scores are never included. Host buttons are on the session page.
+- **Export.** `GET /api/discussions/:id/transcript?format=txt|md|json|srt` (add `&download=1` to save). The host can read everyone's (or one person's with `&speaker=<participantId>`); a participant always gets only their own lines. Scores are never included. Host buttons are on the session page.
 - **Fill gaps from recordings.** If a participant has no live transcript (for example Firefox or Safari with no speech recognition) but consented to transcription and recording, their microphone recording is decoded with `ffmpeg` and transcribed by the offline Whisper worker. This runs automatically when scoring, and the host can re-run it with **Generate from recordings**. Live lines are never replaced, and generated lines are labelled "(from recording)". Timestamps are placed from the moment the person joined, so they are approximate.
 
 Setup for recording transcription: install `ffmpeg` (or set `FFMPEG`), `pip install -r scripts/stt/requirements.txt`, and run `scripts/stt/fetch-stt-model.sh` (or `.ps1`). Without them, scoring continues with the live transcript and the report stays Incomplete for people who have none.
@@ -198,9 +198,9 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 
 ## Deploying
 
-The app is deployed on Render using the included `render.yaml` blueprint. Set the required environment variables in the Render dashboard. For Supabase, use the **Session pooler** connection string; `DIRECT_URL` is optional if `DATABASE_URL` uses the transaction pooler on port 6543. The start command applies the database schema before starting the app. Open `/api/health` on your deployment to check its configuration, then sign in with `HOST_EMAIL` and `HOST_PASSWORD`.
+**Sign-in, dashboards, and reports** run on any host. On Vercel, set the required variables, and the `vercel-build` script applies the database schema during each build (so `DATABASE_URL` must be reachable at build time; for Supabase use the **Session pooler** string, because the direct `db.<ref>.supabase.co` host is IPv6-only and Vercel cannot reach it; `DIRECT_URL` is an optional second string for schema pushes if `DATABASE_URL` is the transaction pooler on port 6543). Open `/api/health` on your deployment to see which setting is missing. The host then signs in with `HOST_EMAIL` and `HOST_PASSWORD`.
 
-Live meetings require a long-running Node process for Socket.IO (`server/index.ts`), provided by the Render web service.
+**Live meetings do not run on Vercel.** They need a long-running Node process for Socket.IO (`server/index.ts`), which Vercel's serverless functions cannot host. Run the whole app on Render instead (this is what `render.yaml` is for), and keep Supabase as the database.
 
 ### Run live meetings on Render + Supabase + LiveKit Cloud
 
@@ -261,3 +261,14 @@ The scoring tests cover an on-topic line, an off-topic line, a reply that stays 
 - Invite email and password-reset email send only when SMTP is set.
 - The moderator invites each quiet person once.
 - Rooms above 40 are rejected. A room this large still depends on this computer's CPU and on UDP port 7882 being reachable.
+
+
+## The meeting room
+
+- **Layouts.** Round table (default), Speaker focus, and Gallery. Each person picks their own, and it is remembered. Whoever speaks moves to the centre of the table; a short hold stops it jumping on a cough. Three reading modes (Sage, Paper, Night).
+- **Video in the seat.** A person's camera shows inside their circle. The ring around the circle fills as they reach a fair share of the talking time; the dot shows connection quality.
+- **AI invitations.** In an AI-moderated discussion (the default), when nobody has spoken for a few seconds the AI invites the connected person who has spoken least (raised hands first). The centre shows "AI invites someone in Ns" and then the invited person's countdown. If they do not reply, the next-quietest person is asked, and so on until somebody speaks.
+- **Host panel.** Room code, End and evaluate, weak connections, every person's live scores, focus keywords, topic primer, all points raised.
+- **Participant panel.** Own session (speaking time, turns, AI invitations, connection), own running scores, own points only.
+- **After the end.** The room closes immediately and scoring continues in the background. The page shows the group summary, scores and transcript when ready: the host sees everyone's, a participant sees only their own.
+- **Why it is quicker.** Mic, camera, and hand buttons update the screen first and tell the network after; the media token is requested while the connection is still being made; ending no longer waits for recordings to upload or for scoring to finish.

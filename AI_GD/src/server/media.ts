@@ -165,18 +165,33 @@ export async function startMediaServer() {
   await startManagedServer();
 }
 
+let checkedAt = 0;
+let checking: Promise<void> | null = null;
+const FRESH_MS = 8_000;
+
+/**
+ * Asking the media server whether it is up is a network round trip, and it used to
+ * run on every join and every lobby poll. A healthy result is reused for a few
+ * seconds, and concurrent callers share one check.
+ */
 export async function getMediaStatus(): Promise<MediaStatus> {
   if (!process.env.LIVEKIT_API_SECRET) {
     setUnavailable("Set LIVEKIT_API_SECRET in .env to enable video.");
     return { ...status };
   }
-
-  if (await mediaResponding()) {
-    status.ready = true;
-    status.error = null;
-  } else if (status.ready) {
-    setUnavailable("LiveKit is not responding. Check that the media server is running.");
+  if (status.ready && Date.now() - checkedAt < FRESH_MS) return { ...status };
+  if (!checking) {
+    checking = (async () => {
+      if (await mediaResponding()) {
+        status.ready = true;
+        status.error = null;
+      } else if (status.ready) {
+        setUnavailable("LiveKit is not responding. Check that the media server is running.");
+      }
+      checkedAt = Date.now();
+    })().finally(() => { checking = null; });
   }
+  await checking;
   return { ...status };
 }
 

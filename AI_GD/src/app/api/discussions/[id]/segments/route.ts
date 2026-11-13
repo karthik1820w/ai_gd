@@ -22,8 +22,10 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   const { id } = await context.params;
   const discussion = await prisma.discussion.findUnique({ where: { id }, include: { participants: true } });
   if (!discussion) return fail("Discussion not found.", 404);
-  const allowed = discussion.hostId === user.id || discussion.participants.some((participant) => participant.userId === user.id);
-  if (!allowed) return fail("You cannot view this transcript.", 403);
-  const segments = await prisma.transcriptSegment.findMany({ where: { discussionId: id }, orderBy: { startedAt: "asc" }, include: { participant: true } });
+  const isHost = discussion.hostId === user.id;
+  const mine = discussion.participants.find((participant) => participant.userId === user.id && !participant.removed);
+  if (!isHost && !mine) return fail("You cannot view this transcript.", 403);
+  // A participant sees only their own lines; the host sees everyone's.
+  const segments = await prisma.transcriptSegment.findMany({ where: isHost ? { discussionId: id } : { discussionId: id, participantId: mine!.id }, orderBy: { startedAt: "asc" }, include: { participant: true } });
   return json(segments.map((segment) => ({ id: segment.id, name: segment.participant.displayName, text: segment.text, relevance: segment.relevance, reason: segment.relevanceReason, startedAt: segment.startedAt })));
 }
