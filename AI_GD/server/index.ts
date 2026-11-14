@@ -3,7 +3,6 @@ import { createServer as createHttp } from "http";
 import { createServer as createHttps } from "https";
 import { existsSync, readFileSync } from "fs";
 import { networkInterfaces } from "os";
-import { parse } from "url";
 import next from "next";
 import { Server } from "socket.io";
 import { startLoops } from "../src/server/loops";
@@ -77,12 +76,12 @@ const server = useHttps
       (req, res) => {
         sanitizeForwardingHeaders(req);
         req.headers["x-forwarded-proto"] = "https";
-        handle(req, res, parse(req.url || "/", true));
+        handle(req, res);
       },
     )
   : createHttp((req, res) => {
       sanitizeForwardingHeaders(req);
-      handle(req, res, parse(req.url || "/", true));
+      handle(req, res);
     });
 
 const io = new Server(server);

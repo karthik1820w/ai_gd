@@ -2,15 +2,15 @@
 export function describeDbError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error ?? "");
   if (/db\.[a-z0-9]+\.supabase\.co/i.test(raw) && /Can't reach database server|ENOTFOUND|ECONNREFUSED|timed out|P1001/i.test(raw))
-    return "Supabase's direct host (db.<ref>.supabase.co) is IPv6-only and Vercel is IPv4. Use the Session pooler connection string (aws-0-<region>.pooler.supabase.com, user postgres.<ref>) as DATABASE_URL.";
+    return "Supabase's direct host (db.<ref>.supabase.co) is IPv6-only and may not be reachable from Render. Use the Session pooler connection string (aws-0-<region>.pooler.supabase.com, user postgres.<ref>) as DATABASE_URL.";
   const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
   const message = error instanceof Error ? error.message : String(error ?? "");
   if (/Environment variable not found|must start with the protocol|invalid port number|Error parsing connection string/i.test(message))
-    return "DATABASE_URL is missing or is not a valid postgresql:// connection string. Set it in Vercel and redeploy.";
+    return "DATABASE_URL is missing or is not a valid postgresql:// connection string. Set it in the Render service environment and redeploy.";
   if (code === "P1000" || /Authentication failed|password authentication failed/i.test(message))
     return "The database rejected the username or password in DATABASE_URL.";
   if (code === "P1001" || /Can't reach database server|ECONNREFUSED|ENOTFOUND|timed out/i.test(message))
-    return "The database cannot be reached. Check the host and port, and allow connections from Vercel (no IP allow-list, or allow all).";
+    return "The database cannot be reached. Check the host and port, and allow connections from the Render service in your database network settings.";
   if (code === "P1003" || /Database .* does not exist/i.test(message))
     return "The database name in DATABASE_URL does not exist.";
   if (code === "P1011" || /TLS|SSL/i.test(message))
@@ -22,8 +22,8 @@ export function describeDbError(error: unknown): string {
   if (code === "P2037" || /too many (database )?connections|remaining connection slots/i.test(message))
     return "Too many database connections. Use your provider's pooled connection string.";
   if (/Query Engine|query_engine|rhel-openssl|binaryTargets/i.test(message))
-    return "The Prisma engine for Vercel's Linux runtime is missing. Redeploy after clearing the build cache.";
-  return "Unexpected database error. Open Vercel -> Deployment -> Logs and look for the error text.";
+    return "The Prisma engine for Render's Linux runtime is missing. Redeploy after clearing the build cache.";
+  return "Unexpected database error. Open the Render service logs and look for the underlying error.";
 }
 
 /** Add pgbouncer settings to a pooled (Supabase/Neon-style) URL so Prisma works on serverless. */

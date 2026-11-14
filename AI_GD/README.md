@@ -198,15 +198,15 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 
 ## Deploying
 
-**Sign-in, dashboards, and reports** run on any host. On Vercel, set the required variables, and the `vercel-build` script applies the database schema during each build (so `DATABASE_URL` must be reachable at build time; for Supabase use the **Session pooler** string, because the direct `db.<ref>.supabase.co` host is IPv6-only and Vercel cannot reach it; `DIRECT_URL` is an optional second string for schema pushes if `DATABASE_URL` is the transaction pooler on port 6543). Open `/api/health` on your deployment to see which setting is missing. The host then signs in with `HOST_EMAIL` and `HOST_PASSWORD`.
+**Render is the supported deployment for the complete app, including live meetings.** Its Blueprint (`render.yaml`) builds the app and runs `start:deploy`, which applies the Prisma schema before starting the long-running Node server for Next.js and Socket.IO. Open `/api/health` on the deployed service to check its database and required settings.
 
-**Live meetings do not run on Vercel.** They need a long-running Node process for Socket.IO (`server/index.ts`), which Vercel's serverless functions cannot host. Run the whole app on Render instead (this is what `render.yaml` is for), and keep Supabase as the database.
+Vercel can host the sign-in, dashboards, and reports, but not live meetings: its serverless functions cannot host the long-running Socket.IO server. If using Vercel for those non-live features, `vercel-build` applies the schema during the build, so the database must be reachable then. For Supabase, use the **Session pooler** string rather than the IPv6-only direct host; `DIRECT_URL` can be set to a session/direct connection when schema changes must use a different URL from runtime traffic.
 
 ### Run live meetings on Render + Supabase + LiveKit Cloud
 
 1. **LiveKit Cloud** (free tier): create a project at https://cloud.livekit.io and copy the WebSocket URL (`wss://...livekit.cloud`), API key and API secret.
 2. **Render**: New -> Blueprint -> pick this repository. If the project sits in a sub-folder of the repo, set **Root Directory** to that folder.
-3. In the Render dashboard set `DATABASE_URL` (Supabase **Session pooler** string), `HOST_EMAIL`, `HOST_PASSWORD`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and optionally `GEMINI_API_KEY`. `JWT_SECRET` is generated for you.
+3. In the Render dashboard set `DATABASE_URL` (Supabase **Session pooler** string), `HOST_EMAIL`, `HOST_PASSWORD`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and optionally `GEMINI_API_KEY`. `JWT_SECRET` is generated for you. If `DATABASE_URL` uses a transaction pooler, set `DIRECT_URL` to a session/direct connection for the schema push.
 4. Deploy. The start command applies the database schema, so no manual database step is needed. Open `https://<your-app>.onrender.com/api/health` to confirm `"ok": true`.
 5. Sign in as the host, create a discussion, and share the meeting link. Each participant joins from Chrome or Edge with microphone permission.
 
