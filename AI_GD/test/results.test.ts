@@ -37,7 +37,7 @@ describe("group summary privacy", () => {
 });
 
 describe("person view", () => {
-  const base = { participantId: "p1", name: "Aarav", overallScore: 75, adjustedScore: null, category: "Strong", incomplete: false, incompleteReason: null, speakingMs: 3000, contributionCount: 2, parameters: [{ key: "k", label: "Knowledge", weight: 0.4, score: 79 }] };
+  const base = { participantId: "p1", name: "Aarav", overallScore: 75, adjustedScore: null, category: "Strong", incomplete: false, incompleteReason: null, speakingMs: 3000, contributionCount: 2, parameters: [{ key: "k", label: "Knowledge", weight: 0.4, score: 79, explanation: "Higher when contributions include evidence." }] };
   it("prefers the host-adjusted score", () => {
     assert.equal(personView({ ...base, adjustedScore: 80, notes: [] }).score, 80);
     assert.equal(personView({ ...base, notes: [] }).score, 75);

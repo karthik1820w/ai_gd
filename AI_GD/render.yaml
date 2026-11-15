@@ -1,5 +1,5 @@
 # Render blueprint for Quorum. Live meetings need a long-running Node server
-# (Socket.IO), which Render provides and Vercel does not.
+# (Socket.IO), which Render provides.
 # Create a Blueprint instance from this repository, then fill in the variables marked
 # "sync: false" in the Render dashboard.
 services:
@@ -12,7 +12,7 @@ services:
     # Next.js + Socket.IO server, so a fresh database works on the first deploy.
     startCommand: npm run start:deploy
     healthCheckPath: /api/health
-    autoDeploy: true
+    autoDeployTrigger: checksPass
     envVars:
       - key: NODE_VERSION
         value: "22.20.0"

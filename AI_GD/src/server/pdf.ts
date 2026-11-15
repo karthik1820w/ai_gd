@@ -1,5 +1,9 @@
 import PDFDocument from "pdfkit";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
+import { buildTranscript } from "@/server/transcript";
+import { moderationText } from "@/server/moderationText";
+import { buildCombinedPdf, buildIndividualPdf, buildTranscriptPdf, type ReportData, type ReportPerson } from "@/server/reportPdf";
 
 const INK = "#1c1915";
 const MUTED = "#5e584e";
@@ -32,30 +36,23 @@ function heading(doc: Doc, title: string, subtitle: string) {
   return 132;
 }
 
-function bar(doc: Doc, label: string, score: number | null, y: number) {
-  doc.font("Helvetica").fontSize(10).fillColor(INK).text(`${label}   ${score == null ? "Not scored" : `${score.toFixed(0)} / 100`}`, 48, y, { width: 500 });
-  doc.roundedRect(48, y + 16, 400, 8, 4).fill(LINE);
-  if (score != null) doc.roundedRect(48, y + 16, Math.max(4, (400 * score) / 100), 8, 4).fill(MOSS);
-  return y + 36;
-}
-
 function ensure(doc: Doc, y: number, needed = 80) {
   if (y + needed < 780) return y;
   doc.addPage();
   return 56;
 }
 
+const reportInclude = {
+  host: true,
+  participants: { include: { user: true, stat: true, moderation: { orderBy: { createdAt: "asc" } } } },
+  evaluations: { include: { parameters: true, notes: true, participant: true } },
+  summary: { include: { points: { orderBy: { sortOrder: "asc" } } } },
+  segments: { orderBy: { startedAt: "asc" }, include: { participant: true } },
+} satisfies Prisma.DiscussionInclude;
+type LoadedDiscussion = Prisma.DiscussionGetPayload<{ include: typeof reportInclude }>;
+
 export async function renderReport(input: { discussionId: string; type: string; participantId?: string; requesterId: string }) {
-  const discussion = await prisma.discussion.findUnique({
-    where: { id: input.discussionId },
-    include: {
-      host: true,
-      participants: { include: { user: true, stat: true } },
-      evaluations: { include: { parameters: true, notes: true, participant: true } },
-      summary: { include: { points: { orderBy: { sortOrder: "asc" } } } },
-      segments: { orderBy: { startedAt: "asc" }, include: { participant: true } },
-    },
-  });
+  const discussion = await prisma.discussion.findUnique({ where: { id: input.discussionId }, include: reportInclude });
   if (!discussion) return { error: "Report not found.", status: 404 as const };
   const isHost = discussion.hostId === input.requesterId;
   const mine = discussion.participants.find((participant) => participant.userId === input.requesterId);
@@ -66,103 +63,103 @@ export async function renderReport(input: { discussionId: string; type: string; 
   if (!isHost && input.type === "INDIVIDUAL" && input.participantId && input.participantId !== mine?.id) {
     return { error: "You can download only your own report.", status: 403 as const };
   }
-  if (discussion.transcriptsPurgedAt && input.type === "TRANSCRIPT") {
-    return { error: "The transcript was deleted under this session's retention setting.", status: 410 as const };
-  }
-
-  // A participant's transcript PDF contains only their own lines.
-  if (!isHost && input.type === "TRANSCRIPT" && mine) discussion.segments = discussion.segments.filter((segment) => segment.participantId === mine.id);
-  const doc = new PDFDocument({ size: "A4", margin: 48, bufferPages: true });
-  const done = collect(doc);
   const when = new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(discussion.startedAt ?? discussion.scheduledAt);
-
-  if (input.type === "INDIVIDUAL") {
-    const evaluation = discussion.evaluations.find((item) => item.participantId === (input.participantId || mine?.id));
-    if (!evaluation) {
-      doc.end();
-      return { error: "That participant does not have a report yet.", status: 404 as const };
-    }
-    drawIndividual(doc, discussion as unknown as ReportDiscussion, evaluation as unknown as ReportDiscussion["evaluations"][number], when);
-  } else if (input.type === "COMBINED") {
-    drawCombined(doc, discussion as unknown as ReportDiscussion, when);
-  } else if (input.type === "SUMMARY") {
-    drawSummary(doc, discussion as unknown as ReportDiscussion, when);
-  } else {
-    drawTranscript(doc, discussion as unknown as ReportDiscussion, when);
-  }
-  footer(doc);
-  doc.end();
-  const buffer = await done;
   const slug = discussion.meetingId;
-  return { buffer, filename: `quorum-${slug}-${input.type.toLowerCase()}.pdf`, type: input.type, discussionId: discussion.id, participantId: input.participantId ?? mine?.id ?? null };
+  const finish = (buffer: Buffer, participantId: string | null) => ({ buffer, filename: `quorum-${slug}-${input.type.toLowerCase()}.pdf`, type: input.type, discussionId: discussion.id, participantId });
+
+  if (input.type === "SUMMARY") {
+    const doc = new PDFDocument({ size: "A4", margin: 48, bufferPages: true });
+    const done = collect(doc);
+    drawSummary(doc, discussion as unknown as ReportDiscussion, when);
+    footer(doc);
+    doc.end();
+    return finish(await done, null);
+  }
+
+  const data = assembleReport(discussion, when);
+  const targetId = input.participantId || mine?.id;
+  if (input.type === "INDIVIDUAL") {
+    if (!targetId) return { error: "That participant does not have a report yet.", status: 404 as const };
+    const buffer = await buildIndividualPdf(data, targetId);
+    if (!buffer) return { error: "That participant does not have a report yet.", status: 404 as const };
+    return finish(buffer, targetId);
+  }
+  if (input.type === "COMBINED") return finish(await buildCombinedPdf(data), null);
+  if (discussion.transcriptsPurgedAt) return { error: "The transcript was deleted under this session's retention setting.", status: 410 as const };
+  // A participant's transcript contains only their own lines.
+  const scope = isHost ? (input.participantId ? { participantId: input.participantId } : {}) : { participantId: mine!.id };
+  return finish(await buildTranscriptPdf(data, scope), scope.participantId ?? null);
 }
 
-function drawIndividual(doc: Doc, discussion: ReportDiscussion, evaluation: ReportDiscussion["evaluations"][number], when: string) {
-  let y = heading(doc, evaluation.participant.displayName, "Individual performance report");
-  y = meta(doc, y, [
-    ["Topic", discussion.topic],
-    ["Session", discussion.title],
-    ["When", when],
-    ["Duration", `${discussion.durationMin} min scheduled`],
-    ["Participant ID", evaluation.participantId],
-  ]);
-  const shown = evaluation.adjustedScore ?? evaluation.overallScore;
-  doc.font("Helvetica-Bold").fontSize(28).fillColor(MOSS).text(shown == null ? "—" : shown.toFixed(0), 48, y);
-  doc.font("Helvetica").fontSize(12).fillColor(INK).text(`/ 100   ·   ${evaluation.adjustedScore != null ? "Host-adjusted" : evaluation.category}`, 110, y + 10);
-  y += 42;
-  if (evaluation.incompleteReason) {
-    doc.font("Helvetica").fontSize(10).fillColor(MUTED).text(evaluation.incompleteReason, 48, y, { width: 500 });
-    y += 36;
-  }
-  doc.font("Helvetica").fontSize(11).fillColor(INK).text(`Speaking time ${Math.round(evaluation.speakingMs / 1000)}s   ·   ${evaluation.contributionCount} contributions   ·   ${evaluation.participationPercent}% of group speech`, 48, y, { width: 500 });
-  y += 28;
-  doc.font("Helvetica").fontSize(9).fillColor(MUTED).text(
-    `${evaluation.source === "gemini" ? `Evaluated by Gemini${evaluation.model ? ` (${evaluation.model})` : ""}` : "Heuristic fallback"}  ·  Weights: ${evaluation.parameters.map((item) => `${item.label} ${Math.round(item.weight * 100)}%`).join(", ")}`,
-    48,
-    y,
-    { width: 500 },
-  );
-  y = doc.y + 12;
-  doc.font("Helvetica-Bold").fontSize(13).text("Detailed evaluation", 48, y);
-  y += 22;
-  for (const parameter of evaluation.parameters) y = bar(doc, `${parameter.label} (${Math.round(parameter.weight * 100)}%)`, parameter.score, y);
-  y = ensure(doc, y, 140);
-  doc.font("Helvetica-Bold").fontSize(13).fillColor(INK).text("AI feedback", 48, y);
-  y += 20;
-  for (const note of evaluation.notes) {
-    y = ensure(doc, y, 40);
-    doc.font("Helvetica-Bold").fontSize(10).fillColor(MOSS).text(note.kind[0] + note.kind.slice(1).toLowerCase(), 48, y);
-    y += 14;
-    doc.font("Helvetica").fontSize(10).fillColor(INK).text(note.body, 48, y, { width: 500 });
-    y = doc.y + 8;
-  }
-  if (evaluation.adjustedScore != null) {
-    y = ensure(doc, y, 70);
-    doc.font("Helvetica-Bold").fontSize(12).text("Host correction", 48, y);
-    doc.font("Helvetica").fontSize(10).text(`Score set to ${evaluation.adjustedScore.toFixed(0)}. Original score ${evaluation.overallScore ?? "—"}. Reason: ${evaluation.adjustmentReason}`, 48, y + 18, { width: 500 });
-  }
-}
+const COVERED = "Concept covered: ";
+const MISSED = "Concept to explore: ";
+const BOILERPLATE = /^(Scores use each person|Moderation: |Accuracy note: )/;
 
-function meta(doc: Doc, y: number, rows: Array<[string, string]>) {
-  for (const [label, value] of rows) {
-    doc.font("Helvetica-Bold").fontSize(9).fillColor(MUTED).text(label.toUpperCase(), 48, y, { continued: false });
-    doc.font("Helvetica").fontSize(11).fillColor(INK).text(value, 160, y, { width: 380 });
-    y += 18;
+/** Turn the saved discussion into the plain data the report builder needs. The host is never included. */
+export function assembleReport(discussion: LoadedDiscussion, when: string): ReportData {
+  const guests = discussion.participants.filter((person) => person.userId !== discussion.hostId);
+  const guestIds = new Set(guests.map((person) => person.id));
+  const full = discussion.transcriptsPurgedAt
+    ? null
+    : buildTranscript({
+        title: discussion.title,
+        topic: discussion.topic,
+        startedAt: discussion.startedAt ?? discussion.scheduledAt,
+        segments: discussion.segments
+          .filter((segment) => guestIds.has(segment.participantId))
+          .map((segment) => ({ id: segment.id, participantId: segment.participantId, name: segment.participant.displayName, text: segment.text, startedAt: segment.startedAt, endedAt: segment.endedAt, source: segment.source })),
+      });
+  const turnsOf = (turns: typeof full extends null ? never : NonNullable<typeof full>["turns"]) => turns.map((turn) => ({ offsetSec: turn.offsetSec, speaker: turn.speaker, text: turn.text, source: turn.source }));
+  const first = discussion.evaluations[0];
+  const people: ReportPerson[] = [];
+  for (const person of guests) {
+    const evaluation = discussion.evaluations.find((item) => item.participantId === person.id);
+    if (!evaluation) continue;
+    const notes = (kind: string) => evaluation.notes.filter((note) => note.kind === kind).map((note) => note.body);
+    const remarks = notes("REMARK");
+    const events = person.moderation.map((event) => ({ kind: event.kind, at: new Intl.DateTimeFormat("en-IN", { timeStyle: "short" }).format(event.createdAt), text: moderationText(event.kind, event.detail) }));
+    people.push({
+      participantId: person.id,
+      name: person.displayName,
+      score: evaluation.adjustedScore ?? evaluation.overallScore,
+      originalScore: evaluation.overallScore,
+      adjusted: evaluation.adjustedScore != null,
+      adjustmentReason: evaluation.adjustmentReason,
+      category: evaluation.category,
+      incomplete: evaluation.incomplete,
+      incompleteReason: evaluation.incompleteReason,
+      speakingMs: evaluation.speakingMs,
+      contributions: evaluation.contributionCount,
+      participationPercent: evaluation.participationPercent,
+      source: evaluation.source,
+      model: evaluation.model,
+      criteria: evaluation.parameters.map((parameter) => ({ key: parameter.key, label: parameter.label, weight: parameter.weight, score: parameter.score, explanation: parameter.explanation })),
+      strengths: notes("STRENGTH"),
+      improvements: notes("IMPROVEMENT"),
+      remark: remarks.find((text) => !text.startsWith(COVERED) && !text.startsWith(MISSED) && !BOILERPLATE.test(text)) ?? "",
+      covered: remarks.filter((text) => text.startsWith(COVERED)).map((text) => text.slice(COVERED.length)),
+      missed: remarks.filter((text) => text.startsWith(MISSED)).map((text) => text.slice(MISSED.length)),
+      moderation: events,
+      removed: person.removed ? { at: person.removedAt ? new Intl.DateTimeFormat("en-IN", { timeStyle: "short" }).format(person.removedAt) : null, reason: person.removedReason || "Disruptive behaviour" } : null,
+      turns: full ? turnsOf(full.turns.filter((turn) => turn.speakerId === person.id)) : [],
+    });
   }
-  return y + 10;
-}
-
-function drawCombined(doc: Doc, discussion: ReportDiscussion, when: string) {
-  let y = heading(doc, "Combined performance", discussion.topic);
-  doc.font("Helvetica").fontSize(10).fillColor(MUTED).text(`${discussion.title}  ·  ${when}`, 48, y);
-  y += 28;
-  for (const evaluation of discussion.evaluations) {
-    y = ensure(doc, y, 36);
-    const score = evaluation.adjustedScore ?? evaluation.overallScore;
-    doc.font("Helvetica-Bold").fontSize(12).fillColor(INK).text(evaluation.participant.displayName, 48, y, { continued: true });
-    doc.font("Helvetica").text(`    ${score == null ? "Incomplete" : score.toFixed(0)}   ${evaluation.category}   ${evaluation.contributionCount} contributions`, { continued: false });
-    y += 22;
-  }
+  const points = discussion.summary?.points ?? [];
+  const ordered = (kind: string) => points.filter((point) => point.kind === kind).map((point) => point.body);
+  return {
+    title: discussion.title,
+    topic: discussion.topic,
+    when,
+    durationMin: discussion.durationMin,
+    hostName: discussion.host.name,
+    evaluatedBy: first?.source === "gemini" ? `Gemini${first.model ? ` (${first.model})` : ""}` : "the built-in scoring",
+    people,
+    group: discussion.summary
+      ? { source: discussion.summary.source, conclusion: ordered("CONCLUSION")[0] ?? "", keyInsights: ordered("IDEA"), agreements: ordered("AGREEMENT"), disagreements: ordered("DISAGREEMENT"), missedTopics: ordered("MISSED_TOPIC"), bestContribution: ordered("BEST_CONTRIBUTION")[0] ?? null }
+      : null,
+    fullTranscript: full ? turnsOf(full.turns) : [],
+    transcriptPurged: Boolean(discussion.transcriptsPurgedAt),
+  };
 }
 
 function drawSummary(doc: Doc, discussion: ReportDiscussion, when: string) {
@@ -186,28 +183,6 @@ function drawSummary(doc: Doc, discussion: ReportDiscussion, when: string) {
   const names = new Map(discussion.participants.map((participant) => [participant.id, participant.displayName]));
   y = ensure(doc, y, 60);
   doc.font("Helvetica").fontSize(10).fillColor(MUTED).text(`Most active: ${names.get(discussion.summary?.mostActiveParticipantId ?? "") ?? "—"}. Least active: ${names.get(discussion.summary?.leastActiveParticipantId ?? "") ?? "—"}. On-topic share: ${discussion.summary?.engagementScore ?? 0}%.`, 48, y, { width: 500 });
-}
-
-function drawTranscript(doc: Doc, discussion: ReportDiscussion, when: string) {
-  let y = heading(doc, "Transcript", discussion.topic);
-  doc.font("Helvetica").fontSize(10).fillColor(MUTED).text(`${discussion.title}  ·  ${when}`, 48, y);
-  y += 24;
-  if (!discussion.segments.length) {
-    doc.font("Helvetica").fontSize(11).fillColor(INK).text("No speech was captured.", 48, y);
-    return;
-  }
-  for (const segment of discussion.segments) {
-    y = ensure(doc, y, 48);
-    const clock = new Intl.DateTimeFormat("en-IN", { hour: "numeric", minute: "2-digit" }).format(segment.startedAt);
-    doc.font("Helvetica-Bold").fontSize(10).fillColor(MOSS).text(`${segment.participant.displayName}   ${clock}   ${segment.relevance.replaceAll("_", " ").toLowerCase()}`, 48, y, { width: 500 });
-    y += 14;
-    doc.font("Helvetica").fontSize(10).fillColor(INK).text(segment.text, 48, y, { width: 500 });
-    y = doc.y + 4;
-    if (segment.relevanceReason) {
-      doc.font("Helvetica-Oblique").fontSize(8).fillColor(MUTED).text(segment.relevanceReason, 48, y, { width: 500 });
-      y = doc.y + 8;
-    }
-  }
 }
 
 type ReportDiscussion = {

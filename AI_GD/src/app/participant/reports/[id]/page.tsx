@@ -7,6 +7,7 @@ import { ScoreChart } from "@/components/ReportView";
 import { TranscriptBlock } from "@/components/TranscriptBlock";
 import { filterBySpeaker } from "@/server/transcript";
 import { generateTranscript } from "@/server/transcriptStore";
+import { moderationText } from "@/server/moderationText";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +17,7 @@ export default async function ParticipantReport({ params }: { params: Promise<{ 
   const { id } = await params;
   const participant = await prisma.discussionParticipant.findUnique({
     where: { discussionId_userId: { discussionId: id, userId: user.id } },
-    include: { discussion: true, evaluation: { include: { parameters: true, notes: true } }, stat: true },
+    include: { discussion: true, evaluation: { include: { parameters: true, notes: true } }, stat: true, moderation: { orderBy: { createdAt: "asc" } } },
   });
   if (!participant) notFound();
   const evaluation = participant.evaluation;
@@ -28,6 +29,18 @@ export default async function ParticipantReport({ params }: { params: Promise<{ 
       <p className="pill">{participant.discussion.topic}</p>
       <h1 className="serif">{participant.displayName}</h1>
       <p className="muted">{formatWhen(participant.discussion.startedAt ?? participant.discussion.scheduledAt)} · scheduled {participant.discussion.durationMin} min · ID {participant.id}</p>
+      {participant.removed && (
+        <div className="card card-pad" style={{ borderColor: "#a3463f", marginBottom: 12 }} role="note">
+          <strong>You were removed from this discussion by the host.</strong>
+          <p style={{ margin: "4px 0 0" }}>{participant.removedAt ? `At ${formatWhen(participant.removedAt)}. ` : ""}Reason: {participant.removedReason || "Disruptive behaviour"}.</p>
+        </div>
+      )}
+      {participant.moderation.filter((event) => event.kind !== "REMOVED").length > 0 && (
+        <div className="card card-pad" style={{ marginBottom: 12 }}>
+          <strong>Host actions during the discussion</strong>
+          {participant.moderation.filter((event) => event.kind !== "REMOVED").map((event) => <p key={event.id} className="muted" style={{ margin: "2px 0" }}>{formatWhen(event.createdAt)} · {moderationText(event.kind, event.detail)}</p>)}
+        </div>
+      )}
       {!evaluation && <p>The host has not finished this discussion yet, so there is no score.</p>}
       {evaluation && (
         <div className="card card-pad">
@@ -46,13 +59,15 @@ export default async function ParticipantReport({ params }: { params: Promise<{ 
             <p className="muted">What was captured from you, and what your scores were based on. {mine.totals.words} words in {mine.totals.turns} turns.</p>
             <TranscriptBlock turns={mine.turns} />
           </>}
+          <h2 className="serif">How your score was worked out</h2>
+          <p className="muted">Each criterion is scored 0 to 100 from your own transcript. The overall score is the weighted total: score × weight, added up. The explanations above say what raised or lowered each one.</p>
           <h2 className="serif">Feedback</h2>
           {evaluation.notes.map((note) => <p key={note.id}><strong>{note.kind.toLowerCase()}: </strong>{note.body}</p>)}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <a className="btn btn-primary" href={`/api/discussions/${id}/pdf?type=INDIVIDUAL&download=1`}>Download PDF</a>
+            <a className="btn btn-primary" href={`/api/discussions/${id}/pdf?type=INDIVIDUAL&download=1`}>Download my report (PDF)</a>
             <a className="btn btn-ghost" href={`/api/discussions/${id}/feedback`}>Download my feedback (.txt)</a>
             <a className="btn btn-ghost" href={`/api/discussions/${id}/pdf?type=INDIVIDUAL`}>Preview PDF</a>
-            <a className="btn btn-ghost" href={`/api/discussions/${id}/pdf?type=TRANSCRIPT`}>Shared transcript</a>
+            <a className="btn btn-ghost" href={`/api/discussions/${id}/pdf?type=TRANSCRIPT&download=1`}>Download my transcript (PDF)</a>
           </div>
         </div>
       )}

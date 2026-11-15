@@ -48,7 +48,10 @@ export type PersonView = {
   incompleteReason: string | null;
   speakingMs: number;
   contributions: number;
-  parameters: Array<{ key: string; label: string; weight: number; score: number | null }>;
+  parameters: Array<{ key: string; label: string; weight: number; score: number | null; explanation: string }>;
+  /** What the host did to this person (mute, camera off, removal). Empty when nothing. */
+  moderation: Array<{ kind: string; text: string; at: string }>;
+  removed: { reason: string; at: string | null } | null;
   strengths: string[];
   improvements: string[];
   covered: string[];
@@ -68,8 +71,10 @@ export function personView(input: {
   incompleteReason: string | null;
   speakingMs: number;
   contributionCount: number;
-  parameters: Array<{ key: string; label: string; weight: number; score: number | null }>;
+  parameters: Array<{ key: string; label: string; weight: number; score: number | null; explanation: string }>;
   notes: NoteRow[];
+  moderation?: Array<{ kind: string; text: string; at: string }>;
+  removed?: { reason: string; at: string | null } | null;
 }): PersonView {
   const notes = (kind: string) => input.notes.filter((note) => note.kind === kind).map((note) => note.body);
   const remarks = notes("REMARK");
@@ -83,6 +88,8 @@ export function personView(input: {
     speakingMs: input.speakingMs,
     contributions: input.contributionCount,
     parameters: input.parameters,
+    moderation: input.moderation ?? [],
+    removed: input.removed ?? null,
     strengths: notes("STRENGTH"),
     improvements: notes("IMPROVEMENT"),
     covered: remarks.filter((text) => text.startsWith(COVERED)).map((text) => text.slice(COVERED.length)),

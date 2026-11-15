@@ -12,7 +12,7 @@ export async function generateTranscript(discussionId: string): Promise<Transcri
     title: discussion.title,
     topic: discussion.topic,
     startedAt: discussion.startedAt ?? discussion.scheduledAt,
-    segments: discussion.segments.map((segment) => ({
+    segments: discussion.segments.filter((segment) => segment.participant.userId !== discussion.hostId).map((segment) => ({
       id: segment.id,
       participantId: segment.participantId,
       name: segment.participant.displayName,

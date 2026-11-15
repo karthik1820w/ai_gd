@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { readSession } from "@/lib/auth";
@@ -14,6 +15,18 @@ export default async function MeetingPage({ params, searchParams }: { params: Pr
   if (!user) redirect(`/login?next=${encodeURIComponent(`/meeting/${meetingId}${code ? `?code=${code}` : ""}`)}`);
   const discussion = await prisma.discussion.findUnique({ where: { meetingId }, include: { accessCodes: { where: { active: true }, take: 1 }, participants: true } });
   if (!discussion || discussion.status === "CANCELLED") notFound();
+  const removedRow = discussion.participants.find((person) => person.userId === user.id && person.removed);
+  if (removedRow && discussion.hostId !== user.id) {
+    return (
+      <main className="content" style={{ maxWidth: 640, margin: "0 auto", paddingTop: 48 }}>
+        <h1 className="serif">You were removed from this discussion</h1>
+        <p>The host removed you{removedRow.removedAt ? ` at ${new Intl.DateTimeFormat("en-IN", { timeStyle: "short" }).format(removedRow.removedAt)}` : ""}.</p>
+        <p><strong>Reason:</strong> {removedRow.removedReason || "Disruptive behaviour"}</p>
+        <p className="muted">You cannot rejoin this discussion. The removal is recorded in your report.</p>
+        <p><Link className="btn btn-primary" href={`/participant/reports/${discussion.id}`}>View my report</Link> <Link className="btn btn-ghost" href="/participant">Back to my discussions</Link></p>
+      </main>
+    );
+  }
   const membership = discussion.participants.find((person) => person.userId === user.id && !person.removed);
   const isHost = discussion.hostId === user.id;
   const active = discussion.accessCodes[0]?.code;

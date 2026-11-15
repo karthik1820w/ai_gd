@@ -84,6 +84,9 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   const [hand, setHand] = useState(false);
   const [screenOn, setScreenOn] = useState(false);
   const [locked, setLocked] = useState(false);
+  const [camLocked, setCamLocked] = useState(false);
+  const [speechIssue, setSpeechIssue] = useState("");
+  const [lockOverrides, setLockOverrides] = useState<Record<string, { mic?: boolean; cam?: boolean }>>({});
   const [localSpeaking, setLocalSpeaking] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [audioBlocked, setAudioBlocked] = useState(false);
@@ -274,7 +277,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       next[index] = row;
       return next;
     }));
-    socket.on("roster", (rows: RosterEntry[]) => { setRoster(rows); setOverrides({}); });
+    socket.on("roster", (rows: RosterEntry[]) => { setRoster(rows); setOverrides({}); setLockOverrides({}); });
     socket.on("floor", (payload: Floor) => {
       setFloor({ lastSpeechAt: payload.lastSpeechAt, inviteAfterMs: payload.inviteAfterMs, moderated: payload.moderated, skew: payload.serverNow - Date.now() });
       setInvite(payload.invite ? { userId: payload.invite.userId, name: nameOf(payload.invite.userId), until: payload.invite.until } : null);
@@ -300,9 +303,20 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
         micRef.current = false;
         setMicOn(false);
         void lkRef.current?.localParticipant.getTrackPublication(Track.Source.Microphone)?.mute();
-      }
+        pushToast("The host muted your microphone.");
+      } else pushToast("The host allowed your microphone again.");
     });
-    socket.on("removed", () => { setFatal("The host removed you from the discussion."); teardownRef.current(true); });
+    socket.on("force-camera", (payload: { locked: boolean }) => {
+      setCamLocked(payload.locked);
+      if (payload.locked) {
+        camRef.current = false;
+        setCamOn(false);
+        localRef.current.getVideoTracks().forEach((track) => { track.enabled = false; });
+        void lkRef.current?.localParticipant.getTrackPublication(Track.Source.Camera)?.mute();
+        pushToast("The host turned off your camera.");
+      } else pushToast("The host allowed your camera again.");
+    });
+    socket.on("removed", (payload?: { message?: string }) => { setFatal(payload?.message || "The host removed you from this discussion. This is recorded in your report."); teardownRef.current(true); });
     socket.on("replaced", () => { setFatal("This discussion was opened in another tab."); teardownRef.current(true); });
     socket.on("meeting-ended", () => { setStatus("COMPLETED"); teardownRef.current(true); });
     socket.on("report-ready", () => setReportKey((value) => value + 1));
@@ -368,14 +382,17 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   // Speech is recognised in this browser and tied to this microphone (see the notes in the earlier version:
   // Chrome ends continuous recognition after a pause, so it is restarted on `onend`).
   useEffect(() => {
-    if (!discussion.transcriptionEnabled || !micOn || status === "COMPLETED" || fatal) return;
+    // The host moderates and is never transcribed.
+    if (isHost || !discussion.transcriptionEnabled || !micOn || status === "COMPLETED" || fatal) return;
     const socket = socketRef.current;
     if (!socket) return;
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Recognition) {
       socket.emit("technical", { kind: "SPEECH_UNSUPPORTED", detail: "This browser has no SpeechRecognition API" });
+      setSpeechIssue("This browser cannot transcribe speech, so your words will not be scored. Open the discussion in Chrome or Edge, or type your points below.");
       return;
     }
+    setSpeechIssue("");
     const recognition = new Recognition();
     let stopped = false;
     let active = false;
@@ -402,6 +419,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
         if (event.results[index].isFinal) finalText += event.results[index][0]?.transcript ?? "";
       }
       if (!finalText.trim()) return;
+      setSpeechIssue("");
       if (!buffer) bufferStart = new Date().toISOString();
       buffer = `${buffer} ${finalText}`.trim();
       window.clearTimeout(flushTimer);
@@ -410,8 +428,9 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     recognition.onerror = (event) => {
       active = false;
       const kind = event.error ?? "unknown";
-      if (kind === "not-allowed" || kind === "service-not-allowed") { socket.emit("technical", { kind: "MIC_DENIED", detail: "Speech recognition permission denied" }); return; }
+      if (kind === "not-allowed" || kind === "service-not-allowed") { socket.emit("technical", { kind: "MIC_DENIED", detail: "Speech recognition permission denied" }); setSpeechIssue("Speech recognition was blocked. Allow the microphone for this site, or type your points below."); return; }
       if (kind === "no-speech" || kind === "aborted") return;
+      if (kind === "network") setSpeechIssue("Speech recognition could not reach its service. Check your connection, or type your points below.");
       socket.emit("technical", { kind: "SPEECH_ERROR", detail: `Speech recognition stopped: ${kind}` });
       restartTimer = window.setTimeout(start, 1000);
     };
@@ -427,7 +446,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       recognition.onend = null;
       try { recognition.stop(); } catch { /* already stopped */ }
     };
-  }, [discussion.id, discussion.transcriptionEnabled, micOn, user.speechLang, status, fatal]);
+  }, [discussion.id, discussion.transcriptionEnabled, micOn, user.speechLang, status, fatal, isHost]);
 
   // Who is speaking right now, from every source: the server's voice activity, LiveKit, and this microphone.
   const speakingIds = useMemo(() => {
@@ -472,6 +491,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   }
 
   function toggleCam(next = !camRef.current) {
+    if (camLocked && next) return;
     camRef.current = next;
     setCamOn(next);
     localRef.current.getVideoTracks().forEach((track) => { track.enabled = next; });
@@ -524,6 +544,23 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   }
   uploadRef.current = uploadRecording;
 
+  // Host moderation. The screen updates first; the server records it for that person's report.
+  function hostMute(person: RosterEntry) {
+    const locked = !(lockOverrides[person.userId]?.mic ?? person.micLocked);
+    setLockOverrides((current) => ({ ...current, [person.userId]: { ...current[person.userId], mic: locked } }));
+    socketRef.current?.emit("host-mute", { userId: person.userId, locked });
+  }
+  function hostCamera(person: RosterEntry) {
+    const locked = !(lockOverrides[person.userId]?.cam ?? person.camLocked ?? false);
+    setLockOverrides((current) => ({ ...current, [person.userId]: { ...current[person.userId], cam: locked } }));
+    socketRef.current?.emit("host-camera", { userId: person.userId, locked });
+  }
+  function hostRemove(person: RosterEntry) {
+    const reason = window.prompt(`Remove ${person.name} from the discussion?\n\nThey will see this reason, cannot rejoin, and it is recorded in their report.`, "Disruptive behaviour");
+    if (reason === null) return;
+    socketRef.current?.emit("host-remove", { userId: person.userId, reason: reason.trim() || "Disruptive behaviour" });
+  }
+
   function endForEveryone() {
     if (!confirm("End the discussion for everyone and score it?")) return;
     // Tell the server first. Everything else (stopping media, saving the recording) follows in the background.
@@ -554,6 +591,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
 
   // ---- What to draw. ----
   const finished = status === "COMPLETED";
+  const wasRemoved = Boolean(fatal && /removed you/i.test(fatal));
   const skew = floor?.skew ?? 0;
   const elapsed = startedAt ? tick + skew - new Date(startedAt).getTime() : 0;
   const remaining = Math.max(0, discussion.durationMin * 60_000 - elapsed);
@@ -639,6 +677,23 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
               <p className="rt-note">Share this code. Participants take a seat when they join.</p>
               {!finished && <button className="rt-btn primary" onClick={endForEveryone}>End and evaluate</button>}
               <div className="rt-row"><span>Weak connections</span><strong>{weak}</strong></div>
+              <h3>People</h3>
+              {guests.filter((person) => person.connected).length === 0 && <p className="muted">Nobody has joined yet.</p>}
+              {guests.filter((person) => person.connected).map((person) => {
+                const micOff = lockOverrides[person.userId]?.mic ?? person.micLocked;
+                const camOff = lockOverrides[person.userId]?.cam ?? person.camLocked ?? false;
+                return (
+                  <div key={person.userId} className="rt-person-row">
+                    <strong style={{ fontSize: 14 }}>{person.name}</strong>
+                    <span className="rt-note">{(overrides[person.userId]?.audio ?? person.audio) ? "Mic on" : "Mic off"} · {(overrides[person.userId]?.video ?? person.video) ? "Camera on" : "Camera off"}</span>
+                    <div className="rt-actions">
+                      <button className={`rt-btn small${micOff ? " on" : ""}`} aria-pressed={micOff} onClick={() => hostMute(person)}>{micOff ? "Allow mic" : "Mute"}</button>
+                      <button className={`rt-btn small${camOff ? " on" : ""}`} aria-pressed={camOff} onClick={() => hostCamera(person)}>{camOff ? "Allow camera" : "Camera off"}</button>
+                      <button className="rt-btn small danger" onClick={() => hostRemove(person)}>Remove</button>
+                    </div>
+                  </div>
+                );
+              })}
               <h3>Live scores</h3>
               {guests.length === 0 && <p className="muted">Nobody has joined yet.</p>}
               {guests.map((person) => {
@@ -687,12 +742,14 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
             <>
               <div className="rt-controls">
                 <button className={`rt-btn${micOn ? "" : " on"}`} aria-pressed={micOn} disabled={locked} onClick={() => toggleMic()}>{micOn ? <Mic size={16} /> : <MicOff size={16} />} {micOn ? "Mic on" : "Mic off"}</button>
-                <button className={`rt-btn${camOn ? "" : " on"}`} aria-pressed={camOn} onClick={() => toggleCam()}>{camOn ? <Video size={16} /> : <VideoOff size={16} />} {camOn ? "Camera on" : "Camera off"}</button>
+                <button className={`rt-btn${camOn ? "" : " on"}`} aria-pressed={camOn} disabled={camLocked} onClick={() => toggleCam()}>{camOn ? <Video size={16} /> : <VideoOff size={16} />} {camOn ? "Camera on" : "Camera off"}</button>
                 {!isHost && <button className="rt-btn primary" onClick={speak}>Speak</button>}
                 {!isHost && <button className={`rt-btn${hand ? " on" : ""}`} aria-pressed={hand} onClick={toggleHand}><Hand size={16} /> {hand ? "Lower hand" : "Raise hand"}</button>}
                 <button className={`rt-btn${screenOn ? " on" : ""}`} aria-pressed={screenOn} onClick={() => void shareScreen()} aria-label="Share screen"><MonitorUp size={16} /></button>
               </div>
               {locked && <p className="rt-hint">The host has muted your microphone.</p>}
+              {camLocked && <p className="rt-hint">The host has turned off your camera.</p>}
+              {speechIssue && !isHost && <p className="rt-note" role="alert" style={{ textAlign: "center", color: "var(--rt-bad)" }}>{speechIssue}</p>}
               {!isHost && discussion.transcriptionEnabled && (
                 <form className="rt-typed" onSubmit={addTyped}>
                   <input className="rt-input" value={typed} maxLength={500} placeholder="No mic? Type your point" aria-label="Type your point" onChange={(event) => setTyped(event.target.value)} />
@@ -707,7 +764,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
         {/* Right: points raised, and Ask the AI. */}
         <aside className="rt-panel">
           <h3>{isHost ? "Points raised" : "Your points"}</h3>
-          {segments.length === 0 && <p className="muted">{!discussion.transcriptionEnabled ? "Transcription is off for this discussion." : !micOn ? "Turn your microphone on to be transcribed." : "Points appear here as people speak."}</p>}
+          {segments.length === 0 && <p className="muted">{!discussion.transcriptionEnabled ? "Transcription is off for this discussion." : isHost ? "Participants' lines appear here as they speak. The host is not transcribed." : !micOn ? "Turn your microphone on to be transcribed." : "Your own words appear here once they are captured. Only you and the host can see them."}</p>}
           <div className="rt-points">
             {segments.slice(-40).map((segment) => (
               <div key={segment.id} className="rt-point">
@@ -745,9 +802,12 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       {(fatal || leaving) && (
         <div className="rt-overlay" role="alertdialog" aria-modal="true">
           <div className="rt-modal">
-            <h2>{leaving ? "Leaving" : "Discussion closed"}</h2>
+            <h2>{leaving ? "Leaving" : wasRemoved ? "You were removed from this discussion" : "Discussion closed"}</h2>
             <p>{leaving ? "Saving your recording before you go…" : fatal}</p>
-            {!leaving && <a className="rt-btn primary" href={isHost ? `/host/sessions/${discussion.id}` : "/participant"}>Continue</a>}
+            {!leaving && <div className="rt-actions">
+              {wasRemoved && !isHost && <a className="rt-btn primary" href={`/participant/reports/${discussion.id}`}>View my report</a>}
+              <a className={`rt-btn${wasRemoved ? "" : " primary"}`} href={isHost ? `/host/sessions/${discussion.id}` : "/participant"}>{wasRemoved ? "Back to my discussions" : "Continue"}</a>
+            </div>}
           </div>
         </div>
       )}

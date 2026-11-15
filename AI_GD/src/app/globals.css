@@ -138,6 +138,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .rt-meter > span { display: block; height: 100%; background: var(--rt-accent); }
 .rt-score { display: grid; grid-template-columns: 38px 1fr 28px; gap: 8px; align-items: center; font-size: 13px; }
 .rt-score b { text-align: right; font-weight: 600; }
+.rt-person-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--rt-line); }
+.rt-btn.small { min-height: 30px; padding: 0 10px; font-size: 12px; border-radius: 9px; }
+.rt-btn.danger { border-color: var(--rt-bad); color: var(--rt-bad); }
+.rt-btn.danger:hover { background: color-mix(in srgb, var(--rt-bad) 12%, transparent); }
 .rt-note { font-size: 12px; color: var(--rt-muted); line-height: 1.5; }
 
 .rt-stagebox { display: flex; flex-direction: column; gap: 12px; min-width: 0; align-items: center; }

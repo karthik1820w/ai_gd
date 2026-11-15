@@ -12,6 +12,7 @@ import { TranscriptBlock } from "@/components/TranscriptBlock";
 import { AutoRefresh } from "@/components/AutoRefresh";
 import { filterBySpeaker } from "@/server/transcript";
 import { generateTranscript } from "@/server/transcriptStore";
+import { moderationText } from "@/server/moderationText";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +24,7 @@ export default async function HostSessionPage({ params }: { params: Promise<{ id
     where: { id },
     include: {
       accessCodes: { where: { active: true }, take: 1 },
-      participants: { include: { stat: true, evaluation: { include: { parameters: true, notes: true } }, user: true } },
+      participants: { include: { stat: true, evaluation: { include: { parameters: true, notes: true } }, user: true, moderation: { orderBy: { createdAt: "asc" } } } },
       summary: { include: { points: true } },
       recordings: true,
     },
@@ -80,8 +81,8 @@ export default async function HostSessionPage({ params }: { params: Promise<{ id
             <ScoreChart rows={guests.flatMap((person) => person.evaluation?.overallScore == null ? [] : [{ name: person.displayName, score: person.evaluation.adjustedScore ?? person.evaluation.overallScore }])} />
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=SUMMARY`}>Summary PDF</a>
-              <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=COMBINED&download=1`}>Combined scores PDF</a>
-              <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=TRANSCRIPT`}>Transcript PDF</a>
+              <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=COMBINED&download=1`}>Full report (PDF): scores, how they were worked out, transcripts</a>
+              <a className="btn btn-ghost" href={`/api/discussions/${discussion.id}/pdf?type=TRANSCRIPT`}>Full transcript (PDF)</a>
               {(["txt", "md", "srt", "json"] as const).map((format) => <a key={format} className="btn btn-ghost" href={`/api/discussions/${discussion.id}/transcript?format=${format}&download=1`}>Transcript .{format}</a>)}
               <a className="btn btn-ghost" href={`/host/sessions/${discussion.id}/preview`}>Preview a PDF</a>
             </div>
@@ -91,10 +92,15 @@ export default async function HostSessionPage({ params }: { params: Promise<{ id
             <section key={person.id} className="card card-pad" style={{ marginBottom: 12 }}>
               <h3>{person.displayName} · {person.evaluation.adjustedScore ?? person.evaluation.overallScore ?? "Incomplete"} · {person.evaluation.category}</h3>
               <p className="muted">{person.evaluation.source === "gemini" ? `Evaluated by Gemini${person.evaluation.model ? ` (${person.evaluation.model})` : ""}` : "Heuristic fallback used."}</p>
-              <a href={`/api/discussions/${discussion.id}/pdf?type=INDIVIDUAL&participantId=${person.id}&download=1`}>Download individual PDF</a>
+              {person.removed && <p className="error" role="note"><strong>Removed by you</strong>{person.removedAt ? ` at ${formatWhen(person.removedAt)}` : ""}. Reason: {person.removedReason || "Disruptive behaviour"}</p>}
+              {person.moderation.filter((event) => event.kind !== "REMOVED").map((event) => <p key={event.id} className="muted" style={{ margin: "2px 0" }}>{formatWhen(event.createdAt)} · {moderationText(event.kind, event.detail)}</p>)}
+              <p style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <a href={`/api/discussions/${discussion.id}/pdf?type=INDIVIDUAL&participantId=${person.id}&download=1`}>Download report (PDF)</a>
+                <a href={`/api/discussions/${discussion.id}/pdf?type=TRANSCRIPT&participantId=${person.id}&download=1`}>Download transcript (PDF)</a>
+              </p>
               {discussion.recordings.filter((recording) => recording.participantId === person.id).map((recording) => <p key={recording.id}><a href={`/api/recordings/${recording.id}`}>Microphone recording</a></p>)}
               {person.evaluation.parameters.map((parameter) => (
-                <p key={parameter.id} style={{ margin: "4px 0" }}><strong>{parameter.label}</strong> ({Math.round(parameter.weight * 100)}%): {parameter.score == null ? "Not scored" : parameter.score.toFixed(0)}</p>
+                <p key={parameter.id} style={{ margin: "4px 0" }}><strong>{parameter.label}</strong> ({Math.round(parameter.weight * 100)}%): {parameter.score == null ? "Not scored" : parameter.score.toFixed(0)}<br /><span className="muted">{parameter.explanation}</span></p>
               ))}
               {transcript && <details style={{ margin: "8px 0" }}>
                 <summary>Transcript ({filterBySpeaker(transcript, person.id).totals.words} words)</summary>

@@ -41,16 +41,19 @@ function client() {
   return new RoomServiceClient(livekitHttp(), key(), secret());
 }
 
-export async function muteLivekitAudio(room: string, identity: string, muted: boolean) {
+async function muteLivekitTracks(room: string, identity: string, type: TrackType, muted: boolean) {
   if (!secret()) return;
   const svc = client();
   const participant = await svc.getParticipant(room, identity);
   await Promise.all(
     participant.tracks
-      .filter((track) => track.type === TrackType.AUDIO)
+      .filter((track) => track.type === type)
       .map((track) => svc.mutePublishedTrack(room, identity, track.sid, muted)),
   );
 }
+
+export const muteLivekitAudio = (room: string, identity: string, muted: boolean) => muteLivekitTracks(room, identity, TrackType.AUDIO, muted);
+export const muteLivekitVideo = (room: string, identity: string, muted: boolean) => muteLivekitTracks(room, identity, TrackType.VIDEO, muted);
 
 export async function removeLivekitParticipant(room: string, identity: string) {
   if (!secret()) return;

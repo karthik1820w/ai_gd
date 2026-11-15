@@ -11,6 +11,7 @@ import { emitDiscussion } from "@/server/realtime";
 import { blendExaminer, computeRubric, parseRubricWeights } from "@/server/rubric";
 import { buildTranscript } from "@/server/transcript";
 import { transcribeRecordings } from "@/server/transcribeRecordings";
+import { moderationText } from "@/server/moderationText";
 import { FORMULA_VERSION, buildFeedback, classifyStatement, scoreParticipant, type PriorLine, type RelevanceLabel } from "@/server/scoring";
 
 type GeminiParticipantReview = {
@@ -194,9 +195,13 @@ export async function evaluateDiscussion(discussionId: string) {
       segments: { orderBy: { startedAt: "asc" }, include: { participant: true } },
       missed: true,
       technical: true,
+      moderation: { orderBy: { createdAt: "asc" } },
     },
   });
   if (!discussion) return null;
+  // The host is not scored and not transcribed: ignore any host lines stored before that rule existed.
+  discussion.segments = discussion.segments.filter((segment) => segment.participant.userId !== discussion.hostId);
+  const segmentWrites: Array<ReturnType<typeof prisma.transcriptSegment.update>> = [];
   for (const segment of discussion.segments) {
     if (segment.relevance !== "PENDING") continue;
     const previous: PriorLine[] = discussion.segments
@@ -222,7 +227,7 @@ export async function evaluateDiscussion(discussionId: string) {
     segment.communicationScore = lexical.communication;
     segment.knowledgeScore = lexical.knowledge;
     segment.reasoningScore = lexical.reasoning;
-    await prisma.transcriptSegment.update({
+    segmentWrites.push(prisma.transcriptSegment.update({
       where: { id: segment.id },
       data: {
         relevance: lexical.relevance,
@@ -238,9 +243,11 @@ export async function evaluateDiscussion(discussionId: string) {
         knowledgeScore: lexical.knowledge,
         reasoningScore: lexical.reasoning,
       },
-    });
+    }));
   }
-  const active = discussion.participants.filter((participant) => !participant.removed && participant.userId !== discussion.hostId);
+  if (segmentWrites.length) await prisma.$transaction(segmentWrites);
+  // Removed participants are still scored on what they contributed, and their report records the removal.
+  const active = discussion.participants.filter((participant) => participant.userId !== discussion.hostId);
   const segmentSpeaking = new Map<string, number>();
   for (const segment of discussion.segments) {
     const duration = Math.max(0, segment.endedAt.getTime() - segment.startedAt.getTime());
@@ -267,7 +274,7 @@ export async function evaluateDiscussion(discussionId: string) {
 
   const previousAdjustments = await prisma.evaluation.findMany({ where: { discussionId } });
   const adjustments = new Map(previousAdjustments.map((item) => [item.participantId, item]));
-  await prisma.evaluation.deleteMany({ where: { discussionId } });
+  const evaluationWrites: Array<ReturnType<typeof prisma.evaluation.deleteMany> | ReturnType<typeof prisma.evaluation.create>> = [prisma.evaluation.deleteMany({ where: { discussionId } })];
 
   let mostId: string | null = null;
   let leastId: string | null = null;
@@ -361,7 +368,7 @@ export async function evaluateDiscussion(discussionId: string) {
         : { strengths: [], improvements: [], remark: "No contributions were recorded" };
     const kept = adjustments.get(participant.id);
     const parameters = rubric.parameters;
-    await prisma.evaluation.create({
+    evaluationWrites.push(prisma.evaluation.create({
       data: {
         discussionId,
         participantId: participant.id,
@@ -403,6 +410,7 @@ export async function evaluateDiscussion(discussionId: string) {
             ...feedback.strengths.map((body) => ({ kind: NoteKind.STRENGTH, body })),
             ...feedback.improvements.map((body) => ({ kind: NoteKind.IMPROVEMENT, body })),
             { kind: NoteKind.REMARK, body: feedback.remark || (examiner ? `Evaluated by Gemini (${aiModel("final")}).` : "Gemini was unavailable; this evaluation uses heuristic scoring.") },
+            ...discussion.moderation.filter((event) => event.participantId === participant.id).map((event) => ({ kind: NoteKind.REMARK, body: `Moderation: ${moderationText(event.kind, event.detail)}` })),
             { kind: NoteKind.REMARK, body: "Scores use each person's own microphone transcript. Appearance, accent, gender, and personality are not inputs." },
             ...(examiner?.conceptsCovered.map((body) => ({ kind: NoteKind.REMARK, body: `Concept covered: ${body}` })) ?? []),
             ...(examiner?.conceptsMissed.map((body) => ({ kind: NoteKind.REMARK, body: `Concept to explore: ${body}` })) ?? []),
@@ -411,8 +419,10 @@ export async function evaluateDiscussion(discussionId: string) {
           ],
         },
       },
-    });
+    }));
   }
+  // One transaction: the old scores are replaced by the new ones together, never half-way.
+  await prisma.$transaction(evaluationWrites);
 
   const summaryBody = await summarise(discussion, review?.group);
   const relevanceAverage = discussion.segments.length

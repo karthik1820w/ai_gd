@@ -22,12 +22,16 @@ function PersonCard({ person, mine }: { person: ResultsPerson; mine: boolean }) 
       <p className="muted" style={{ margin: 0, fontSize: 13 }}>
         {shortTime(person.speakingMs)} · {person.contributions} {person.contributions === 1 ? "turn" : "turns"} · {person.category}
       </p>
+      {person.removed && <p className="rt-chip bad" role="note" style={{ margin: 0, borderRadius: 12 }}>Removed by the host{person.removed.at ? ` at ${new Date(person.removed.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}. Reason: {person.removed.reason}</p>}
+      {person.moderation.filter((event) => event.kind !== "REMOVED").map((event) => <p key={`${event.kind}-${event.at}`} className="rt-note">{new Date(event.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · {event.text}</p>)}
       {person.incomplete && person.incompleteReason && <p className="rt-note">{person.incompleteReason}</p>}
+      <strong style={{ fontSize: 13 }}>How this score was worked out</strong>
       {person.parameters.map((parameter) => (
         <div className="rt-crit" key={parameter.key}>
           <span>{parameter.label} <span className="muted">({Math.round(parameter.weight * 100)}%)</span></span>
           <b>{parameter.score == null ? "–" : Math.round(parameter.score)}</b>
           <div className="rt-meter"><span style={{ width: `${Math.max(0, Math.min(100, parameter.score ?? 0))}%` }} /></div>
+          {parameter.explanation && <span className="rt-note" style={{ gridColumn: "1 / -1" }}>{parameter.explanation}</span>}
         </div>
       ))}
       {person.strengths.length > 0 && <div><strong style={{ fontSize: 13 }}>Strengths</strong><ul style={{ margin: "4px 0 0", paddingLeft: 18, fontSize: 13 }}>{person.strengths.map((item) => <li key={item}>{item}</li>)}</ul></div>}
@@ -94,7 +98,7 @@ export function Results({ discussionId, refreshKey }: { discussionId: string; re
       {summary && (
         <div className="rt-panel" style={{ gap: 12 }}>
           <h2>Group summary</h2>
-          <p className="muted" style={{ margin: 0 }}>Evaluated by {data.evaluatedBy}{data.formula ? ` · Overall = ${data.formula}` : ""}</p>
+          <p className="muted" style={{ margin: 0 }}>Evaluated by {data.evaluatedBy}{data.formula ? ` · ${data.formula}` : ""}</p>
           {summary.conclusion && <p style={{ margin: 0 }}>{summary.conclusion}</p>}
           <div className="rt-summary">
             <div><strong>Key insights</strong><ul>{summary.keyInsights.length ? summary.keyInsights.map((item) => <li key={item}>{item}</li>) : <li>None recorded</li>}</ul></div>
@@ -105,8 +109,8 @@ export function Results({ discussionId, refreshKey }: { discussionId: string; re
           {summary.bestContribution && <p style={{ margin: 0 }}><strong>Best contribution:</strong> {summary.bestContribution}</p>}
           <div className="rt-actions">
             {isHost
-              ? <a className="rt-btn primary" href={`/api/discussions/${discussionId}/pdf?type=COMBINED&download=1`}>Download full report</a>
-              : mineId && <a className="rt-btn primary" href={`/api/discussions/${discussionId}/pdf?type=INDIVIDUAL&participantId=${mineId}&download=1`}>Download my feedback</a>}
+              ? <a className="rt-btn primary" href={`/api/discussions/${discussionId}/pdf?type=COMBINED&download=1`}>Download full report (PDF)</a>
+              : mineId && <a className="rt-btn primary" href={`/api/discussions/${discussionId}/pdf?type=INDIVIDUAL&participantId=${mineId}&download=1`}>Download my report (PDF)</a>}
           </div>
         </div>
       )}
@@ -122,7 +126,8 @@ export function Results({ discussionId, refreshKey }: { discussionId: string; re
         <h2>{isHost ? "Meeting transcript" : "Your transcript"}</h2>
         <p className="muted" style={{ border: 0, paddingBottom: 0 }}>{isHost ? "Everyone who took part. Only you can see all of it." : "Only you can see this. It is what your score was based on."}</p>
         <div className="rt-actions">
-          <a className="rt-btn primary" href={`/api/discussions/${discussionId}/transcript?format=txt&download=1`}>{isHost ? "Download full transcript" : "Download my transcript"}</a>
+          <a className="rt-btn primary" href={`/api/discussions/${discussionId}/pdf?type=TRANSCRIPT&download=1`}>{isHost ? "Download full transcript (PDF)" : "Download my transcript (PDF)"}</a>
+          <a className="rt-btn" href={`/api/discussions/${discussionId}/transcript?format=txt&download=1`}>.txt</a>
         </div>
         {turns.length === 0 && <p className="muted">No speech was captured.</p>}
         {turns.map((turn) => (

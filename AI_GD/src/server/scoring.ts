@@ -26,13 +26,18 @@ export function clamp(n: number, min = 0, max = 100) {
   return Math.min(max, Math.max(min, n));
 }
 
+/** Grade bands, highest first. Printed in reports so a score can be read without guessing. */
+export const GRADE_BANDS = [
+  { min: 85, label: "Excellent" },
+  { min: 70, label: "Strong" },
+  { min: 55, label: "Adequate" },
+  { min: 40, label: "Developing" },
+  { min: 0, label: "Limited" },
+] as const;
+
 export function categoryFor(score: number | null, incomplete: boolean) {
   if (incomplete || score == null) return "Incomplete";
-  if (score >= 85) return "Excellent";
-  if (score >= 70) return "Strong";
-  if (score >= 55) return "Adequate";
-  if (score >= 40) return "Developing";
-  return "Limited";
+  return (GRADE_BANDS.find((band) => score >= band.min) ?? GRADE_BANDS[GRADE_BANDS.length - 1]).label;
 }
 
 export function wordCount(text: string) {

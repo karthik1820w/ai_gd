@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/guard";
 import { filterBySpeaker } from "@/server/transcript";
 import { generateTranscript } from "@/server/transcriptStore";
 import { formulaText, groupSummaryView, personView } from "@/server/resultsView";
+import { moderationText } from "@/server/moderationText";
 
 /**
  * Results for the finished-discussion screen.
@@ -18,17 +19,18 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   const discussion = await prisma.discussion.findUnique({
     where: { id },
     include: {
-      participants: { include: { evaluation: { include: { parameters: true, notes: true } } } },
+      participants: { include: { evaluation: { include: { parameters: true, notes: true } }, moderation: { orderBy: { createdAt: "asc" } } } },
       summary: { include: { points: true } },
     },
   });
   if (!discussion) return fail("Discussion not found.", 404);
   const isHost = discussion.hostId === user.id;
-  const mine = discussion.participants.find((person) => person.userId === user.id && !person.removed);
+  // A removed participant can still read their own results: the removal is part of them.
+  const mine = discussion.participants.find((person) => person.userId === user.id);
   if (!isHost && !mine) return fail("You cannot view these results.", 403);
   if (discussion.status !== "COMPLETED") return json({ ready: false, status: discussion.status });
 
-  const scored = discussion.participants.filter((person) => !person.removed && person.userId !== discussion.hostId);
+  const scored = discussion.participants.filter((person) => person.userId !== discussion.hostId);
   const visible = isHost ? scored : scored.filter((person) => person.id === mine!.id);
   const withEvaluation = visible.filter((person) => person.evaluation);
   // Ready once every person this viewer may see has been scored.
@@ -47,8 +49,10 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
       incompleteReason: evaluation.incompleteReason,
       speakingMs: evaluation.speakingMs,
       contributionCount: evaluation.contributionCount,
-      parameters: evaluation.parameters.map((parameter) => ({ key: parameter.key, label: parameter.label, weight: parameter.weight, score: parameter.score })),
+      parameters: evaluation.parameters.map((parameter) => ({ key: parameter.key, label: parameter.label, weight: parameter.weight, score: parameter.score, explanation: parameter.explanation })),
       notes: evaluation.notes,
+      moderation: person.moderation.map((event) => ({ kind: event.kind, at: event.createdAt.toISOString(), text: moderationText(event.kind, event.detail) })),
+      removed: person.removed ? { reason: person.removedReason || "Disruptive behaviour", at: person.removedAt?.toISOString() ?? null } : null,
     });
   });
 

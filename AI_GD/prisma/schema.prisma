@@ -112,6 +112,7 @@ model Discussion {
   events        ModeratorEvent[]
   missed        MissedOpportunity[]
   technical     TechnicalIssue[]
+  moderation    ModerationEvent[]
   summary       DiscussionSummary?
   recordings    Recording[]
   reports       Report[]
@@ -144,6 +145,9 @@ model DiscussionParticipant {
   leftAt               DateTime?
   removed              Boolean   @default(false)
   micLocked            Boolean   @default(false)
+  camLocked            Boolean   @default(false)
+  removedAt            DateTime?
+  removedReason        String?
   mediaReady           Boolean   @default(false)
   speechAvailable      Boolean   @default(true)
   transcriptionConsent Boolean   @default(false)
@@ -159,9 +163,26 @@ model DiscussionParticipant {
   missed     MissedOpportunity[]
   technical  TechnicalIssue[]
   recording  Recording?
+  moderation ModerationEvent[]
 
   @@unique([discussionId, userId])
   @@index([discussionId])
+}
+
+/// What the host did to a participant (mute, camera off, removal). Shown in that person's report.
+model ModerationEvent {
+  id            String   @id @default(cuid())
+  discussionId  String
+  participantId String
+  kind          String
+  detail        String?
+  createdAt     DateTime @default(now())
+
+  discussion  Discussion            @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+  participant DiscussionParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@index([discussionId])
+  @@index([participantId])
 }
 
 model Transcript {

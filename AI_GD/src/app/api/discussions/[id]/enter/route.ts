@@ -21,7 +21,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   if (!access) return fail("The access code is not valid.", 403);
   if ("error" in access && access.error) return fail(access.error, 403);
   const existing = await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId: id, userId: user.id } } });
-  if (existing?.removed) return fail("The host removed you from this discussion.", 403);
+  if (existing?.removed) return fail(`The host removed you from this discussion. Reason: ${existing.removedReason || "Disruptive behaviour"}. You cannot rejoin.`, 403);
   if (!existing && user.id !== discussion.hostId) {
     const seated = await seatsTaken(id, discussion.hostId);
     if (seated >= discussion.maxParticipants) return fail("This discussion is full.", 409);

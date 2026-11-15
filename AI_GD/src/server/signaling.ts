@@ -12,7 +12,7 @@ import {
   noteSpeech,
 } from "@/server/activity";
 import { endDiscussion } from "@/server/evaluate";
-import { muteLivekitAudio, removeLivekitParticipant } from "@/server/livekit";
+import { muteLivekitAudio, muteLivekitVideo, removeLivekitParticipant } from "@/server/livekit";
 import { startDiscussion } from "@/server/live";
 import { publishRoster } from "@/server/moderator";
 import { emitDiscussion } from "@/server/realtime";
@@ -139,6 +139,9 @@ export function attachSignaling(io: Server) {
       }
       socket.data.name = participant.displayName;
       socket.data.participantId = participant.id;
+      // A person the host muted or switched off stays that way if they reconnect.
+      if (participant.micLocked) socket.emit("force-mute", { locked: true });
+      if (participant.camLocked) socket.emit("force-camera", { locked: true });
       const existing = room(discussionId).presence.get(user.id);
       if (existing && existing.socketId !== socket.id) {
         io.to(existing.socketId).emit("replaced");
@@ -356,33 +359,58 @@ export function attachSignaling(io: Server) {
       logEvent(discussionId, "technical", { userId: socket.data.user.id, kind });
     });
 
+    // Host moderation. The person is told first so the effect is instant; the database and the
+    // media server are updated in parallel afterwards. Every action is recorded for that person's report.
     socket.on("host-mute", async (payload: { userId?: string; locked?: boolean }) => {
       if (!allowEvent(1)) return;
       const discussion = await hostDiscussion(socket);
       if (!discussion || !payload?.userId || payload.userId === discussion.hostId) return;
-      await prisma.discussionParticipant.updateMany({
-        where: { discussionId: discussion.id, userId: payload.userId },
-        data: { micLocked: Boolean(payload.locked) },
-      });
-      await muteLivekitAudio(discussion.meetingId, payload.userId, Boolean(payload.locked)).catch((error) => console.error("Could not mute the media track.", error));
+      const locked = Boolean(payload.locked);
       const presence = room(discussion.id).presence.get(payload.userId);
-      if (presence) io.to(presence.socketId).emit("force-mute", { locked: Boolean(payload.locked) });
-      logEvent(discussion.id, "host-mute", { targetUserId: payload.userId, locked: Boolean(payload.locked) });
+      if (presence) io.to(presence.socketId).emit("force-mute", { locked });
+      const [row] = await Promise.all([
+        prisma.discussionParticipant.update({ where: { discussionId_userId: { discussionId: discussion.id, userId: payload.userId } }, data: { micLocked: locked }, select: { id: true } }).catch(() => null),
+        muteLivekitAudio(discussion.meetingId, payload.userId, locked).catch((error) => console.error("Could not mute the media track.", error)),
+      ]);
+      if (row) await prisma.moderationEvent.create({ data: { discussionId: discussion.id, participantId: row.id, kind: locked ? "MIC_MUTED" : "MIC_ALLOWED" } }).catch(() => undefined);
+      logEvent(discussion.id, "host-mute", { targetUserId: payload.userId, locked });
       publishRoster(discussion.id);
     });
 
-    socket.on("host-remove", async (payload: { userId?: string }) => {
+    socket.on("host-camera", async (payload: { userId?: string; locked?: boolean }) => {
       if (!allowEvent(1)) return;
       const discussion = await hostDiscussion(socket);
       if (!discussion || !payload?.userId || payload.userId === discussion.hostId) return;
-      await prisma.discussionParticipant.updateMany({ where: { discussionId: discussion.id, userId: payload.userId }, data: { removed: true, leftAt: new Date() } });
-      await removeLivekitParticipant(discussion.meetingId, payload.userId).catch((error) => console.error("Could not remove the media participant.", error));
+      const locked = Boolean(payload.locked);
+      const presence = room(discussion.id).presence.get(payload.userId);
+      if (presence) io.to(presence.socketId).emit("force-camera", { locked });
+      const [row] = await Promise.all([
+        prisma.discussionParticipant.update({ where: { discussionId_userId: { discussionId: discussion.id, userId: payload.userId } }, data: { camLocked: locked }, select: { id: true } }).catch(() => null),
+        muteLivekitVideo(discussion.meetingId, payload.userId, locked).catch((error) => console.error("Could not turn off the camera track.", error)),
+      ]);
+      if (row) await prisma.moderationEvent.create({ data: { discussionId: discussion.id, participantId: row.id, kind: locked ? "CAMERA_OFF" : "CAMERA_ALLOWED" } }).catch(() => undefined);
+      logEvent(discussion.id, "host-camera", { targetUserId: payload.userId, locked });
+      publishRoster(discussion.id);
+    });
+
+    socket.on("host-remove", async (payload: { userId?: string; reason?: string }) => {
+      if (!allowEvent(1)) return;
+      const discussion = await hostDiscussion(socket);
+      if (!discussion || !payload?.userId || payload.userId === discussion.hostId) return;
+      const reason = (payload.reason ?? "").replace(/\s+/g, " ").trim().slice(0, 300) || "Disruptive behaviour";
+      const message = `The host removed you from this discussion. Reason: ${reason}. You cannot rejoin this discussion, and this is recorded in your report.`;
       const presence = room(discussion.id).presence.get(payload.userId);
       if (presence) {
-        io.to(presence.socketId).emit("removed");
-        io.sockets.sockets.get(presence.socketId)?.disconnect(true);
+        io.to(presence.socketId).emit("removed", { message, reason });
+        // Let the message arrive before the connection closes.
+        setTimeout(() => io.sockets.sockets.get(presence.socketId)?.disconnect(true), 400);
       }
-      logEvent(discussion.id, "host-remove", { targetUserId: payload.userId });
+      const [row] = await Promise.all([
+        prisma.discussionParticipant.update({ where: { discussionId_userId: { discussionId: discussion.id, userId: payload.userId } }, data: { removed: true, leftAt: new Date(), removedAt: new Date(), removedReason: reason }, select: { id: true } }).catch(() => null),
+        removeLivekitParticipant(discussion.meetingId, payload.userId).catch((error) => console.error("Could not remove the media participant.", error)),
+      ]);
+      if (row) await prisma.moderationEvent.create({ data: { discussionId: discussion.id, participantId: row.id, kind: "REMOVED", detail: reason } }).catch(() => undefined);
+      logEvent(discussion.id, "host-remove", { targetUserId: payload.userId, reason });
       publishRoster(discussion.id);
     });
 

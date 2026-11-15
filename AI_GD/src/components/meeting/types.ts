@@ -59,6 +59,7 @@ export type RosterEntry = {
   hand: boolean;
   speaking: boolean;
   micLocked: boolean;
+  camLocked?: boolean;
   speakingMs: number;
   contributions: number;
   invites: number;
@@ -112,7 +113,9 @@ export type ResultsPerson = {
   incompleteReason: string | null;
   speakingMs: number;
   contributions: number;
-  parameters: Array<{ key: string; label: string; weight: number; score: number | null }>;
+  parameters: Array<{ key: string; label: string; weight: number; score: number | null; explanation: string }>;
+  moderation: Array<{ kind: string; text: string; at: string }>;
+  removed: { reason: string; at: string | null } | null;
   strengths: string[];
   improvements: string[];
   covered: string[];

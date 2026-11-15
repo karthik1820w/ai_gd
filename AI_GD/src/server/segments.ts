@@ -249,6 +249,8 @@ export async function addSegment(input: { discussionId: string; userId: string; 
   if (!discussion || discussion.status === "COMPLETED" || discussion.status === "CANCELLED") return null;
   if (!discussion.transcriptionEnabled || discussion.transcriptsPurgedAt) return null;
   if (!participant || participant.removed || !participant.transcriptionConsent) return null;
+  // The host moderates; they are not scored, so their speech is never transcribed or stored.
+  if (participant.userId === discussion.hostId) return null;
   const duplicate = recent.find((segment) => segment.participantId === participant.id && segment.text.toLowerCase() === text.toLowerCase() && Date.now() - segment.createdAt.getTime() < 8000);
   if (duplicate) return segmentDTO(duplicate);
 
