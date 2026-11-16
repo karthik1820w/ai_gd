@@ -29,7 +29,8 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   const speaker = isHost ? url.searchParams.get("speaker") : mine!.id;
   const doc = speaker ? filterBySpeaker(full, speaker) : full;
   const rendered = renderTranscript(doc, format);
-  const safe = discussion.title.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 60) || "discussion";
+  const who = doc.speakers.length === 1 ? doc.speakers[0].speaker.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 30) : "";
+  const safe = `${discussion.title.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 60) || "discussion"}${who ? `-${who}` : ""}`;
   return new Response(rendered.body, {
     headers: {
       "Content-Type": rendered.contentType,

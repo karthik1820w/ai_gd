@@ -5,6 +5,7 @@ import { filterBySpeaker } from "@/server/transcript";
 import { generateTranscript } from "@/server/transcriptStore";
 import { formulaText, groupSummaryView, personView } from "@/server/resultsView";
 import { moderationText } from "@/server/moderationText";
+import { evaluationError, isEvaluating } from "@/server/evaluate";
 
 /**
  * Results for the finished-discussion screen.
@@ -33,9 +34,10 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   const scored = discussion.participants.filter((person) => person.userId !== discussion.hostId);
   const visible = isHost ? scored : scored.filter((person) => person.id === mine!.id);
   const withEvaluation = visible.filter((person) => person.evaluation);
-  // Ready once every person this viewer may see has been scored.
-  const ready = withEvaluation.length === visible.length && Boolean(discussion.summary) && visible.length > 0;
-  if (!ready) return json({ ready: false, status: discussion.status });
+  // Ready once every person this viewer may see has been scored. The group summary is a bonus: wait for it only while scoring is still running.
+  const scoredAll = withEvaluation.length === visible.length;
+  const ready = scoredAll && (visible.length === 0 ? !isEvaluating(id) : Boolean(discussion.summary) || !isEvaluating(id));
+  if (!ready) return json({ ready: false, role: isHost ? "host" : "participant", status: discussion.status, running: isEvaluating(id), error: isEvaluating(id) ? "" : evaluationError(id) });
 
   const people = withEvaluation.map((person) => {
     const evaluation = person.evaluation!;

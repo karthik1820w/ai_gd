@@ -195,10 +195,11 @@ export async function evaluateDiscussion(discussionId: string) {
       segments: { orderBy: { startedAt: "asc" }, include: { participant: true } },
       missed: true,
       technical: true,
-      moderation: { orderBy: { createdAt: "asc" } },
     },
   });
   if (!discussion) return null;
+  // Host actions are context for the report. If they cannot be read, scoring still goes ahead.
+  const moderation = await prisma.moderationEvent.findMany({ where: { discussionId }, orderBy: { createdAt: "asc" } }).catch((error) => { console.error("Could not read moderation events.", error); return []; });
   // The host is not scored and not transcribed: ignore any host lines stored before that rule existed.
   discussion.segments = discussion.segments.filter((segment) => segment.participant.userId !== discussion.hostId);
   const segmentWrites: Array<ReturnType<typeof prisma.transcriptSegment.update>> = [];
@@ -333,6 +334,7 @@ export async function evaluateDiscussion(discussionId: string) {
       participation: scored.participation,
       examiner,
       weights: configuredWeights.weights,
+      aiAnalysed: Boolean(examiner) || own.some((segment) => segment.analysisSource === "gemini"),
     });
     const clarity = transcriptDoc.speakers.find((speaker) => speaker.speakerId === participant.id)?.clarity ?? null;
     const rubric = computeRubric({
@@ -410,7 +412,7 @@ export async function evaluateDiscussion(discussionId: string) {
             ...feedback.strengths.map((body) => ({ kind: NoteKind.STRENGTH, body })),
             ...feedback.improvements.map((body) => ({ kind: NoteKind.IMPROVEMENT, body })),
             { kind: NoteKind.REMARK, body: feedback.remark || (examiner ? `Evaluated by Gemini (${aiModel("final")}).` : "Gemini was unavailable; this evaluation uses heuristic scoring.") },
-            ...discussion.moderation.filter((event) => event.participantId === participant.id).map((event) => ({ kind: NoteKind.REMARK, body: `Moderation: ${moderationText(event.kind, event.detail)}` })),
+            ...moderation.filter((event) => event.participantId === participant.id).map((event) => ({ kind: NoteKind.REMARK, body: `Moderation: ${moderationText(event.kind, event.detail)}` })),
             { kind: NoteKind.REMARK, body: "Scores use each person's own microphone transcript. Appearance, accent, gender, and personality are not inputs." },
             ...(examiner?.conceptsCovered.map((body) => ({ kind: NoteKind.REMARK, body: `Concept covered: ${body}` })) ?? []),
             ...(examiner?.conceptsMissed.map((body) => ({ kind: NoteKind.REMARK, body: `Concept to explore: ${body}` })) ?? []),
@@ -486,7 +488,26 @@ export async function evaluateDiscussion(discussionId: string) {
 }
 
 const evaluations = new Map<string, Promise<void>>();
+const evaluationErrors = new Map<string, string>();
 
+/** True while scoring for this discussion is running. */
+export function isEvaluating(discussionId: string) {
+  return evaluations.has(discussionId);
+}
+
+/** Why the last scoring run failed, in words a host can act on. Empty when it did not fail. */
+export function evaluationError(discussionId: string) {
+  return evaluationErrors.get(discussionId) ?? "";
+}
+
+function describeEvaluationError(error: unknown) {
+  const code = typeof error === "object" && error && "code" in error ? String((error as { code: unknown }).code) : "";
+  const message = error instanceof Error ? error.message : String(error);
+  if (code === "P2021" || code === "P2022" || /does not exist/i.test(message)) {
+    return "The database is out of date for this version. Run `npm run db:push` (a redeploy does it), then recalculate.";
+  }
+  return `Scoring stopped with an error: ${message.replace(/\s+/g, " ").slice(0, 200)}`;
+}
 /** Scoring, run once at a time per discussion, then announced to the room. */
 function runEvaluation(discussionId: string) {
   const running = evaluations.get(discussionId);
@@ -496,8 +517,10 @@ function runEvaluation(discussionId: string) {
     let summary: Awaited<ReturnType<typeof evaluateDiscussion>> = null;
     try {
       summary = await evaluateDiscussion(discussionId);
+      evaluationErrors.delete(discussionId);
     } catch (error) {
-      console.error(error);
+      console.error("Scoring failed.", error);
+      evaluationErrors.set(discussionId, describeEvaluationError(error));
       summaryError = "The discussion ended, but the report could not be finished. Open the session and recalculate.";
     }
     finalizeJournal(discussionId, { status: "COMPLETED", endedAt: new Date().toISOString(), summary, summaryError });

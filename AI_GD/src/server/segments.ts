@@ -225,11 +225,34 @@ async function modelClassification(input: {
   }
 }
 
-export async function addSegment(input: { discussionId: string; userId: string; text: string; startedAt?: string; endedAt?: string }) {
+/** Why a spoken line was not saved. `benign` ones are normal (noise, the host speaking) and need no warning. */
+export type SegmentRejection = "too-short" | "too-long" | "ended" | "disabled" | "no-consent" | "removed" | "host" | "not-joined";
+const REJECTIONS: Record<SegmentRejection, { message: string; benign: boolean }> = {
+  "too-short": { message: "Too short to keep.", benign: true },
+  "too-long": { message: "That line was too long to keep.", benign: true },
+  host: { message: "The host is not transcribed.", benign: true },
+  ended: { message: "This discussion has ended.", benign: false },
+  disabled: { message: "Transcription is switched off for this discussion.", benign: false },
+  "no-consent": { message: "Your transcription consent was not recorded. Leave, rejoin, and tick the consent box.", benign: false },
+  removed: { message: "You were removed from this discussion.", benign: false },
+  "not-joined": { message: "You have not joined this discussion yet.", benign: false },
+};
+
+export type SegmentResult =
+  | { ok: true; segment: ReturnType<typeof segmentDTO> }
+  | { ok: false; reason: SegmentRejection; message: string; benign: boolean };
+
+/**
+ * Save one spoken line. Always says why when it does not: a silent drop is how a person ends up with
+ * "no transcript" and nobody knows. Timing comes from the server clock (the person's own clock can be
+ * wrong); only the line's length, which is clock-independent, is taken from the browser.
+ */
+export async function addSegmentResult(input: { discussionId: string; userId: string; text: string; startedAt?: string; endedAt?: string; source?: "live" | "recording" }): Promise<SegmentResult> {
+  const reject = (reason: SegmentRejection): SegmentResult => ({ ok: false, reason, ...REJECTIONS[reason] });
   const text = input.text.replace(/\s+/g, " ").trim();
   const words = wordCount(text);
-  if (words < 2 && !/^(yes|no|agree|disagree)$/i.test(text)) return null;
-  if (text.length > 2000) return null;
+  if (words < 2 && !/^(yes|no|agree|disagree)$/i.test(text)) return reject("too-short");
+  if (text.length > 2000) return reject("too-long");
 
   const [discussion, participant, recent] = await Promise.all([
     prisma.discussion.findUnique({
@@ -246,13 +269,15 @@ export async function addSegment(input: { discussionId: string; userId: string; 
       include: { participant: true },
     }),
   ]);
-  if (!discussion || discussion.status === "COMPLETED" || discussion.status === "CANCELLED") return null;
-  if (!discussion.transcriptionEnabled || discussion.transcriptsPurgedAt) return null;
-  if (!participant || participant.removed || !participant.transcriptionConsent) return null;
+  if (!discussion || discussion.status === "COMPLETED" || discussion.status === "CANCELLED") return reject("ended");
+  if (!discussion.transcriptionEnabled || discussion.transcriptsPurgedAt) return reject("disabled");
+  if (!participant) return reject("not-joined");
+  if (participant.removed) return reject("removed");
   // The host moderates; they are not scored, so their speech is never transcribed or stored.
-  if (participant.userId === discussion.hostId) return null;
+  if (participant.userId === discussion.hostId) return reject("host");
+  if (!participant.transcriptionConsent) return reject("no-consent");
   const duplicate = recent.find((segment) => segment.participantId === participant.id && segment.text.toLowerCase() === text.toLowerCase() && Date.now() - segment.createdAt.getTime() < 8000);
-  if (duplicate) return segmentDTO(duplicate);
+  if (duplicate) return { ok: true, segment: segmentDTO(duplicate) };
 
   const previous: PriorLine[] = recent
     .slice()
@@ -275,8 +300,11 @@ export async function addSegment(input: { discussionId: string; userId: string; 
       }).slice(0, 3000)
     : "";
   const last = recent[0];
-  const started = input.startedAt ? new Date(input.startedAt) : new Date();
-  const ended = input.endedAt ? new Date(input.endedAt) : new Date();
+  const claimedStart = input.startedAt ? Date.parse(input.startedAt) : Number.NaN;
+  const claimedEnd = input.endedAt ? Date.parse(input.endedAt) : Number.NaN;
+  const lengthMs = Number.isFinite(claimedStart) && Number.isFinite(claimedEnd) ? Math.min(60_000, Math.max(0, claimedEnd - claimedStart)) : 0;
+  const ended = new Date();
+  const started = new Date(ended.getTime() - lengthMs);
   const lexical = classifyStatement({
     topic: discussion.topic,
     description: discussion.description,
@@ -286,8 +314,8 @@ export async function addSegment(input: { discussionId: string; userId: string; 
     secondsSincePrevious: last ? Math.max(0, (started.getTime() - last.startedAt.getTime()) / 1000) : null,
   });
 
-  const transcriptId = discussion.transcript?.id;
-  if (!transcriptId) return null;
+  // Older discussions may lack the Transcript row; make it rather than lose the line.
+  const transcriptId = discussion.transcript?.id ?? (await prisma.transcript.upsert({ where: { discussionId: discussion.id }, create: { discussionId: discussion.id }, update: {} })).id;
 
   const created = await prisma.transcriptSegment.create({
     data: {
@@ -299,6 +327,7 @@ export async function addSegment(input: { discussionId: string; userId: string; 
       endedAt: ended,
       wordCount: words,
       relevance: "PENDING",
+      source: input.source ?? "live",
     },
     include: { participant: true },
   });
@@ -330,7 +359,13 @@ export async function addSegment(input: { discussionId: string; userId: string; 
     roomPending.delete(pending);
     if (!roomPending.size) pendingByDiscussion.delete(discussion.id);
   });
-  return segmentDTO(created);
+  return { ok: true, segment: segmentDTO(created) };
+}
+
+/** The simple form, for callers that only need the saved line (or nothing). */
+export async function addSegment(input: { discussionId: string; userId: string; text: string; startedAt?: string; endedAt?: string }) {
+  const result = await addSegmentResult(input);
+  return result.ok ? result.segment : null;
 }
 
 async function finishAnalysis(segmentId: string, hostId: string, input: Parameters<typeof modelClassification>[0]) {
@@ -441,6 +476,7 @@ export async function publishLiveScores(discussionId: string) {
       })),
       participation: scored.participation,
       weights: configuredWeights,
+      aiAnalysed: own.some((segment) => segment.analysisSource === "gemini"),
     });
     const rubric = computeRubric({ scored, knowledge: pillars.knowledge, weights: rubricWeights });
     return {

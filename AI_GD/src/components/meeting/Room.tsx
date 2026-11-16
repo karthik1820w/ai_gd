@@ -7,8 +7,10 @@ import { Hand, Mic, MicOff, MonitorUp, PhoneOff, Video, VideoOff } from "lucide-
 import { createSpeakingDetector } from "@/lib/speakingDetector";
 import { FocusTracker, LAYOUTS, isLayoutMode, type LayoutMode } from "@/lib/stageLayout";
 import { FIRST_INVITE_AFTER_MS, secondsUntilInvite } from "@/lib/floor";
-import { buildSeats, centerMessage, connectionText, qualityLabel, spacedCode, type LiveOverride } from "@/lib/meetingView";
+import { buildSeats, centerMessage, clockLabel, connectionText, qualityLabel, spacedCode, type LiveOverride } from "@/lib/meetingView";
 import { formatClock } from "@/lib/format";
+import { SpeechChunker, encodeWav } from "@/lib/audioChunks";
+import { startPcmCapture } from "@/lib/pcmCapture";
 import { Stage } from "./Stage";
 import { RemoteAudio } from "./media";
 import { Results } from "./Results";
@@ -67,6 +69,10 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   const [qualities, setQualities] = useState<Record<string, string>>({});
   const [activeSpeakers, setActiveSpeakers] = useState<Set<string>>(new Set());
   const [segments, setSegments] = useState<Segment[]>([]);
+  // Words being spoken right now (not final yet), by speaker. Shown only to that speaker and the host.
+  const [interims, setInterims] = useState<Record<string, { name: string; text: string; at: number }>>({});
+  const [transcriptFilter, setTranscriptFilter] = useState<string>("all");
+  const pointsRef = useRef<HTMLDivElement | null>(null);
   const [floor, setFloor] = useState<FloorState | null>(null);
   const [invite, setInvite] = useState<Invite | null>(null);
   const [lastSpeechLocal, setLastSpeechLocal] = useState(0);
@@ -86,6 +92,9 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   const [locked, setLocked] = useState(false);
   const [camLocked, setCamLocked] = useState(false);
   const [speechIssue, setSpeechIssue] = useState("");
+  const [captureIssue, setCaptureIssue] = useState("");
+  const [savedLines, setSavedLines] = useState(0);
+  const [audioMode, setAudioMode] = useState(false);
   const [lockOverrides, setLockOverrides] = useState<Record<string, { mic?: boolean; cam?: boolean }>>({});
   const [localSpeaking, setLocalSpeaking] = useState(false);
   const [leaving, setLeaving] = useState(false);
@@ -124,8 +133,50 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   const speakingIdsRef = useRef<Set<string>>(new Set());
   const teardownRef = useRef<(background: boolean) => void>(() => undefined);
   const uploadRef = useRef<() => Promise<void>>(async () => undefined);
+  const watchedRef = useRef(false);
+  const queueRef = useRef<Array<{ text: string; startedAt: string; endedAt: string }>>([]);
+  const savedRef = useRef(0);
+  const aiRef = useRef(false);
+  const audioModeRef = useRef(false);
+  const speechMsRef = useRef(0);
+  const speakStartRef = useRef(0);
+  const recogFailures = useRef(0);
 
   useEffect(() => { voiceRef.current = voice; }, [voice]);
+  useEffect(() => {
+    const box = pointsRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [segments.length, interims, transcriptFilter]);
+  useEffect(() => { aiRef.current = aiOn; }, [aiOn]);
+  useEffect(() => { audioModeRef.current = audioMode; }, [audioMode]);
+
+  // ---- Saving spoken lines. Every line is acknowledged: saved, or the reason it was not. ----
+  const noteAckRef = useRef<(result?: { ok: boolean; message?: string; benign?: boolean }) => void>(() => undefined);
+  noteAckRef.current = (result) => {
+    if (result?.ok) {
+      savedRef.current += 1;
+      setSavedLines(savedRef.current);
+      setCaptureIssue("");
+    } else if (result && !result.benign) {
+      setCaptureIssue(result.message || "Your words could not be saved.");
+    }
+  };
+  function sendLine(line: { text: string; startedAt: string; endedAt: string }) {
+    const socket = socketRef.current;
+    if (!socket) return;
+    // Before the room is joined the server would drop the line, so hold it until it can be saved.
+    if (!watchedRef.current) { queueRef.current.push(line); return; }
+    socket.emit("transcript", line, noteAckRef.current);
+  }
+  function useAudioFallback(reason: string) {
+    // Sticky for the session, so the two transcription paths never both send the same words.
+    if (audioModeRef.current || !aiRef.current || isHost) return;
+    audioModeRef.current = true;
+    setAudioMode(true);
+    setSpeechIssue("");
+    socketRef.current?.emit("technical", { kind: "SPEECH_FALLBACK", detail: reason });
+    pushToast("Your browser cannot transcribe, so short audio clips are being turned into text instead.");
+  }
   useEffect(() => { rosterRef.current = roster; }, [roster]);
 
   // Remember the person's layout and reading mode.
@@ -254,7 +305,11 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       setStatus(payload.status);
       setStartedAt(payload.startedAt);
       setAiOn(Boolean(payload.ai));
+      aiRef.current = Boolean(payload.ai);
       setBrief(payload.brief ?? null);
+      // The room is joined: send any lines that were spoken before this moment.
+      watchedRef.current = true;
+      for (const line of queueRef.current.splice(0)) socket.emit("transcript", line, noteAckRef.current);
       if (payload.status === "LIVE" || (isHost && payload.status === "SCHEDULED")) enterMedia();
     });
     socket.on("session-live", (payload: { startedAt: string | null }) => { setStatus("LIVE"); setStartedAt(payload.startedAt); enterMedia(); });
@@ -270,12 +325,21 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     socket.on("live-scores", (payload: { scores: LiveScore[] }) => setLiveScores(payload.scores));
     socket.on("my-live-score", (payload: { score: LiveScore }) => setMyScore(payload.score));
     socket.on("transcript-history", (rows: Segment[]) => setSegments(rows));
+    socket.on("interim", (row: { userId: string; name: string; text: string; at: number }) => setInterims((current) => {
+      if (!row.text) { const { [row.userId]: _gone, ...rest } = current; return rest; }
+      return { ...current, [row.userId]: { name: row.name, text: row.text, at: Date.now() } };
+    }));
     socket.on("segment", (row: Segment) => setSegments((current) => {
       const index = current.findIndex((item) => item.id === row.id);
       if (index === -1) return [...current, row];
       const next = [...current];
       next[index] = row;
       return next;
+    }));
+    socket.on("segment", (row: Segment) => setInterims((current) => {
+      if (!current[row.userId]) return current;
+      const { [row.userId]: _saved, ...rest } = current;
+      return rest;
     }));
     socket.on("roster", (rows: RosterEntry[]) => { setRoster(rows); setOverrides({}); setLockOverrides({}); });
     socket.on("floor", (payload: Floor) => {
@@ -336,6 +400,8 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
         for (const value of data) { const n = (value - 128) / 128; sum += n * n; }
         const event = detector.update(Math.sqrt(sum / data.length), micRef.current, performance.now());
         if (event !== null) {
+          if (event) speakStartRef.current = Date.now();
+          else if (speakStartRef.current) { speechMsRef.current += Date.now() - speakStartRef.current; speakStartRef.current = 0; }
           speakingRef.current = event;
           setLocalSpeaking(event);
           socket.emit("speaking", { speaking: event });
@@ -379,17 +445,19 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [discussion.id]);
 
-  // Speech is recognised in this browser and tied to this microphone (see the notes in the earlier version:
-  // Chrome ends continuous recognition after a pause, so it is restarted on `onend`).
+  // Speech is recognised in this browser and tied to this microphone. Chrome ends continuous recognition
+  // after a pause, so it is restarted on `onend`. If the browser cannot do this (or keeps failing), the
+  // audio fallback below takes over, and this effect stops sending.
   useEffect(() => {
     // The host moderates and is never transcribed.
-    if (isHost || !discussion.transcriptionEnabled || !micOn || status === "COMPLETED" || fatal) return;
+    if (isHost || !discussion.transcriptionEnabled || !micOn || status === "COMPLETED" || fatal || audioMode) return;
     const socket = socketRef.current;
     if (!socket) return;
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Recognition) {
       socket.emit("technical", { kind: "SPEECH_UNSUPPORTED", detail: "This browser has no SpeechRecognition API" });
-      setSpeechIssue("This browser cannot transcribe speech, so your words will not be scored. Open the discussion in Chrome or Edge, or type your points below.");
+      if (aiRef.current) useAudioFallback("This browser has no SpeechRecognition API");
+      else setSpeechIssue("This browser cannot transcribe speech, so your words will not be scored. Open the discussion in Chrome or Edge, or type your points below.");
       return;
     }
     setSpeechIssue("");
@@ -398,12 +466,22 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     let active = false;
     let buffer = "";
     let bufferStart = "";
+    // When this phrase actually began (first interim word), so a line's length is the real length of speech.
+    let phraseStart = "";
+    let lastInterimAt = 0;
     let flushTimer = 0;
     let restartTimer = 0;
 
     const flush = () => {
-      if (buffer) socket.emit("transcript", { text: buffer, startedAt: bufferStart, endedAt: new Date().toISOString() });
+      if (buffer && !audioModeRef.current) sendLine({ text: buffer, startedAt: bufferStart || new Date().toISOString(), endedAt: new Date().toISOString() });
       buffer = "";
+      bufferStart = "";
+    };
+    const sendInterim = (text: string) => {
+      const now = Date.now();
+      if (text && now - lastInterimAt < 350) return;
+      lastInterimAt = now;
+      if (watchedRef.current) socket.emit("interim", { text });
     };
     const start = () => {
       if (stopped || active) return;
@@ -415,24 +493,44 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     recognition.lang = user.speechLang || "en-IN";
     recognition.onresult = (event) => {
       let finalText = "";
+      let interimText = "";
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        if (event.results[index].isFinal) finalText += event.results[index][0]?.transcript ?? "";
+        const piece = event.results[index][0]?.transcript ?? "";
+        if (event.results[index].isFinal) finalText += piece;
+        else interimText += piece;
       }
-      if (!finalText.trim()) return;
+      if ((finalText.trim() || interimText.trim()) && !phraseStart) phraseStart = new Date().toISOString();
+      if (!finalText.trim()) {
+        if (interimText.trim()) sendInterim(`${buffer} ${interimText}`.trim());
+        return;
+      }
+      recogFailures.current = 0;
       setSpeechIssue("");
-      if (!buffer) bufferStart = new Date().toISOString();
+      if (!buffer) bufferStart = phraseStart || new Date().toISOString();
+      phraseStart = "";
       buffer = `${buffer} ${finalText}`.trim();
       window.clearTimeout(flushTimer);
+      sendInterim(buffer);
       flushTimer = window.setTimeout(flush, /[.?!]$/.test(buffer) ? 500 : 1200);
     };
     recognition.onerror = (event) => {
       active = false;
       const kind = event.error ?? "unknown";
-      if (kind === "not-allowed" || kind === "service-not-allowed") { socket.emit("technical", { kind: "MIC_DENIED", detail: "Speech recognition permission denied" }); setSpeechIssue("Speech recognition was blocked. Allow the microphone for this site, or type your points below."); return; }
       if (kind === "no-speech" || kind === "aborted") return;
-      if (kind === "network") setSpeechIssue("Speech recognition could not reach its service. Check your connection, or type your points below.");
-      socket.emit("technical", { kind: "SPEECH_ERROR", detail: `Speech recognition stopped: ${kind}` });
-      restartTimer = window.setTimeout(start, 1000);
+      if (kind === "language-not-supported" && recognition.lang !== "en-US") {
+        // Some browsers do not offer the regional variant; plain English still understands Indian English.
+        recognition.lang = "en-US";
+        restartTimer = window.setTimeout(start, 300);
+        return;
+      }
+      recogFailures.current += 1;
+      const hard = kind === "not-allowed" || kind === "service-not-allowed" || kind === "audio-capture" || kind === "network" || kind === "language-not-supported";
+      socket.emit("technical", { kind: kind === "not-allowed" || kind === "service-not-allowed" ? "MIC_DENIED" : "SPEECH_ERROR", detail: `Speech recognition stopped: ${kind}` });
+      if (hard && recogFailures.current >= 2 && aiRef.current) { useAudioFallback(`Speech recognition kept failing: ${kind}`); return; }
+      if (kind === "not-allowed" || kind === "service-not-allowed") setSpeechIssue("Speech recognition was blocked. Allow the microphone for this site, or type your points below.");
+      else if (kind === "network") setSpeechIssue("Speech recognition could not reach its service. Check your connection, or type your points below.");
+      else if (kind === "audio-capture") setSpeechIssue("No microphone was available to the speech recogniser. Check which microphone is selected, or type your points below.");
+      if (kind !== "not-allowed" && kind !== "service-not-allowed") restartTimer = window.setTimeout(start, 1000);
     };
     recognition.onend = () => { active = false; if (!stopped) restartTimer = window.setTimeout(start, 400); };
     start();
@@ -441,12 +539,50 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       stopped = true;
       window.clearTimeout(flushTimer);
       window.clearTimeout(restartTimer);
+      flush();
       recognition.onresult = null;
       recognition.onerror = null;
       recognition.onend = null;
       try { recognition.stop(); } catch { /* already stopped */ }
     };
-  }, [discussion.id, discussion.transcriptionEnabled, micOn, user.speechLang, status, fatal, isHost]);
+  }, [discussion.id, discussion.transcriptionEnabled, micOn, user.speechLang, status, fatal, isHost, audioMode]);
+
+  // Fallback: cut the microphone into spoken clips and have the server turn them into text.
+  useEffect(() => {
+    if (!audioMode || isHost || !micOn || status === "COMPLETED" || fatal || !discussion.transcriptionEnabled) return;
+    const chunker = new SpeechChunker();
+    let chain: Promise<void> = Promise.resolve();
+    const upload = (clip: { samples: Int16Array; durationMs: number }) => {
+      const wav = encodeWav(clip.samples);
+      chain = chain.then(async () => {
+        try {
+          const response = await fetch(`/api/discussions/${discussion.id}/audio`, { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav as unknown as BodyInit });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) { setCaptureIssue(body.error || "A clip could not be transcribed."); return; }
+          noteAckRef.current(body.empty ? { ok: false, benign: true } : { ok: Boolean(body.ok), message: body.message, benign: body.benign });
+        } catch {
+          setCaptureIssue("Could not reach the server to transcribe your speech. Check your connection.");
+        }
+      });
+    };
+    const stop = startPcmCapture(localRef.current, (samples) => { for (const clip of chunker.push(samples)) upload(clip); });
+    return () => {
+      stop();
+      const rest = chunker.flush();
+      if (rest) upload(rest);
+    };
+  }, [audioMode, isHost, micOn, status, fatal, discussion.id, discussion.transcriptionEnabled]);
+
+  // Watchdog: the person has clearly been talking, yet recognition has saved nothing. Switch to the fallback.
+  useEffect(() => {
+    if (isHost || !discussion.transcriptionEnabled || audioMode || status === "COMPLETED") return;
+    const timer = window.setInterval(() => {
+      const spoken = speechMsRef.current + (speakStartRef.current ? Date.now() - speakStartRef.current : 0);
+      if (spoken >= 10_000 && savedRef.current === 0 && aiRef.current) useAudioFallback("Heard speech for 10 seconds but saved no words");
+    }, 4_000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHost, discussion.transcriptionEnabled, audioMode, status]);
 
   // Who is speaking right now, from every source: the server's voice activity, LiveKit, and this microphone.
   const speakingIds = useMemo(() => {
@@ -527,7 +663,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     const text = typed.trim();
     if (!text) return;
     const now = new Date().toISOString();
-    socketRef.current?.emit("transcript", { text, startedAt: now, endedAt: now });
+    sendLine({ text, startedAt: now, endedAt: now });
     setTyped("");
   }
 
@@ -630,6 +766,14 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   const keywords = brief?.status === "ready" ? (brief.key_concepts ?? []).slice(0, 4).map((concept) => concept.term) : [];
   const remoteAudio = [...peers.values()].filter((peer) => peer.audioTrack);
 
+  // What the person should know about their own transcription, right now.
+  const captureProblem = Boolean(captureIssue || speechIssue);
+  const captureText = captureIssue || speechIssue
+    || (!micOn ? "Turn your microphone on to be transcribed."
+      : audioMode ? `Transcribing with the AI audio fallback · ${savedLines} ${savedLines === 1 ? "line" : "lines"} saved`
+      : savedLines > 0 ? `Transcribing · ${savedLines} ${savedLines === 1 ? "line" : "lines"} saved. Only you and the host can see them.`
+      : "Listening. Speak, and your words appear under Your points.");
+
   const primer = (
     <>
       <h3>Topic primer</h3>
@@ -685,7 +829,9 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
                 return (
                   <div key={person.userId} className="rt-person-row">
                     <strong style={{ fontSize: 14 }}>{person.name}</strong>
-                    <span className="rt-note">{(overrides[person.userId]?.audio ?? person.audio) ? "Mic on" : "Mic off"} · {(overrides[person.userId]?.video ?? person.video) ? "Camera on" : "Camera off"}</span>
+                    <span className="rt-note">{(overrides[person.userId]?.audio ?? person.audio) ? "Mic on" : "Mic off"} · {(overrides[person.userId]?.video ?? person.video) ? "Camera on" : "Camera off"} · {person.contributions} {person.contributions === 1 ? "line" : "lines"} transcribed</span>
+                    {person.speechAvailable === false && person.contributions === 0 && <span className="rt-chip warn">Browser cannot transcribe{aiOn ? " (AI fallback)" : ""}</span>}
+                    {person.speechAvailable !== false && person.contributions === 0 && person.speakingMs > 10_000 && <span className="rt-chip warn">Heard speaking, no words captured yet</span>}
                     <div className="rt-actions">
                       <button className={`rt-btn small${micOff ? " on" : ""}`} aria-pressed={micOff} onClick={() => hostMute(person)}>{micOff ? "Allow mic" : "Mute"}</button>
                       <button className={`rt-btn small${camOff ? " on" : ""}`} aria-pressed={camOff} onClick={() => hostCamera(person)}>{camOff ? "Allow camera" : "Camera off"}</button>
@@ -749,7 +895,9 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
               </div>
               {locked && <p className="rt-hint">The host has muted your microphone.</p>}
               {camLocked && <p className="rt-hint">The host has turned off your camera.</p>}
-              {speechIssue && !isHost && <p className="rt-note" role="alert" style={{ textAlign: "center", color: "var(--rt-bad)" }}>{speechIssue}</p>}
+              {!isHost && discussion.transcriptionEnabled && (
+                <p className="rt-note" role={captureProblem ? "alert" : "status"} style={{ textAlign: "center", color: captureProblem ? "var(--rt-bad)" : undefined }}>{captureText}</p>
+              )}
               {!isHost && discussion.transcriptionEnabled && (
                 <form className="rt-typed" onSubmit={addTyped}>
                   <input className="rt-input" value={typed} maxLength={500} placeholder="No mic? Type your point" aria-label="Type your point" onChange={(event) => setTyped(event.target.value)} />
@@ -761,19 +909,41 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
           )}
         </section>
 
-        {/* Right: points raised, and Ask the AI. */}
+        {/* Right: the live transcript, and Ask the AI. */}
         <aside className="rt-panel">
-          <h3>{isHost ? "Points raised" : "Your points"}</h3>
+          <h3>{isHost ? "Live transcript" : "Your transcript"}</h3>
+          {isHost && guests.length > 1 && (
+            <select className="rt-input" aria-label="Show transcript for" value={transcriptFilter} onChange={(event) => setTranscriptFilter(event.target.value)}>
+              <option value="all">Everyone</option>
+              {guests.map((person) => <option key={person.userId} value={person.userId}>{person.name}</option>)}
+            </select>
+          )}
           {segments.length === 0 && <p className="muted">{!discussion.transcriptionEnabled ? "Transcription is off for this discussion." : isHost ? "Participants' lines appear here as they speak. The host is not transcribed." : !micOn ? "Turn your microphone on to be transcribed." : "Your own words appear here once they are captured. Only you and the host can see them."}</p>}
-          <div className="rt-points">
-            {segments.slice(-40).map((segment) => (
-              <div key={segment.id} className="rt-point">
-                <strong>{segment.name}</strong>
-                <p>{segment.text}</p>
-                <div className="rt-chips">{pointTags(segment).map((tag) => <span key={tag.text} className={`rt-chip ${tag.tone}`}>{tag.text}</span>)}</div>
-              </div>
-            ))}
+          <div className="rt-points" ref={pointsRef} aria-live="polite">
+            {segments.filter((segment) => transcriptFilter === "all" || segment.userId === transcriptFilter).slice(-200).map((segment) => {
+              const offset = startedAt ? (new Date(segment.startedAt).getTime() - new Date(startedAt).getTime()) / 1000 : null;
+              return (
+                <div key={segment.id} className="rt-point">
+                  <strong>{isHost ? segment.name : "You"}{offset != null && <span className="rt-time"> · {clockLabel(Math.max(0, offset))}</span>}</strong>
+                  <p>{segment.text}</p>
+                  <div className="rt-chips">{pointTags(segment).map((tag) => <span key={tag.text} className={`rt-chip ${tag.tone}`}>{tag.text}</span>)}</div>
+                </div>
+              );
+            })}
+            {Object.entries(interims)
+              .filter(([userId, caption]) => tick - caption.at < 6000 && (transcriptFilter === "all" || userId === transcriptFilter))
+              .map(([userId, caption]) => (
+                <div key={`live-${userId}`} className="rt-point rt-interim" aria-hidden="true">
+                  <strong>{isHost ? caption.name : "You"}<span className="rt-time"> · speaking now</span></strong>
+                  <p>{caption.text}…</p>
+                </div>
+              ))}
           </div>
+          {segments.length > 0 && (
+            <div className="rt-actions">
+              <a className="rt-btn" href={`/api/discussions/${discussion.id}/transcript?format=txt&download=1${isHost && transcriptFilter !== "all" && segments.find((segment) => segment.userId === transcriptFilter)?.participantId ? `&speaker=${encodeURIComponent(segments.find((segment) => segment.userId === transcriptFilter)!.participantId!)}` : ""}`}>{isHost ? "Download transcript so far (.txt)" : "Download my transcript so far (.txt)"}</a>
+            </div>
+          )}
           {aiOn && (
             <>
               <h3>Ask the AI</h3>

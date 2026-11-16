@@ -1,7 +1,10 @@
 import { embed, cosine } from "./embed.ts";
 
 export const COOKIE = "quorum_token";
-export const FORMULA_VERSION = "2";
+export const FORMULA_VERSION = "3";
+
+/** Speaking time (from voice activity) that counts as "the person did speak". */
+export const HEARD_SPEECH_MS = 5_000;
 
 export const WEIGHTS = {
   topicRelevance: 0.25,
@@ -265,9 +268,15 @@ export function scoreParticipant(input: ScoreInput): ScoreResult {
   const participationPercent = Math.round(share * 1000) / 10;
   const fairShare = 1 / Math.max(input.participantCount, 1);
   const contributedEnough = count >= 3 || (count > 0 && share >= fairShare * 0.8);
+  // The microphone was heard for a while, yet no words were captured: speech recognition failed, not the person.
+  const heardNotTranscribed = count === 0 && input.speakingMs >= HEARD_SPEECH_MS;
+  const heardSeconds = Math.round(input.speakingMs / 1000);
 
   let participation = 10;
-  if (count === 0) {
+  if (heardNotTranscribed) {
+    // Estimated from time spoken (voice activity), capped so it never beats a real, transcribed contribution.
+    participation = clamp(20 + Math.min(60, input.speakingMs / 1000) * 0.8, 0, 68);
+  } else if (count === 0) {
     if (!input.speechAvailable || !input.mediaReady || input.blockingTechnical || input.missed.technical > 0) participation = 55;
     else if (input.missed.disconnect > 0 && input.missed.noResponse === 0) participation = 48;
     else if (input.missed.muted > 0) participation = 22;
@@ -281,18 +290,22 @@ export function scoreParticipant(input: ScoreInput): ScoreResult {
   }
   participation = clamp(participation);
 
-  const incomplete = count === 0 && (!input.mediaReady || !input.speechAvailable || input.blockingTechnical || input.missed.technical > 0 || input.missed.disconnect > 0);
+  const incomplete = count === 0 && (heardNotTranscribed || !input.mediaReady || !input.speechAvailable || input.blockingTechnical || input.missed.technical > 0 || input.missed.disconnect > 0);
   let incompleteReason: string | null = null;
   if (incomplete) {
-    if (!input.speechAvailable) incompleteReason = "This browser did not expose speech recognition, so spoken words were not available to score.";
-    else if (!input.mediaReady) incompleteReason = "No working microphone was detected, so there is no speech evidence to score.";
-    else if (input.missed.disconnect > 0) incompleteReason = "The connection dropped before a scorable contribution was captured.";
-    else incompleteReason = "A technical problem was logged before any contribution was captured.";
+    const heard = heardNotTranscribed ? ` The microphone was active for about ${heardSeconds} seconds, so participation is estimated from that.` : "";
+    if (heardNotTranscribed && input.speechAvailable) incompleteReason = `No words were transcribed, so content could not be scored (speech recognition returned no text).${heard}`;
+    else if (!input.speechAvailable) incompleteReason = `This browser did not expose speech recognition, so spoken words were not available to score.${heard}`;
+    else if (!input.mediaReady) incompleteReason = `No working microphone was detected, so there is no speech evidence to score.${heard}`;
+    else if (input.missed.disconnect > 0) incompleteReason = `The connection dropped before a scorable contribution was captured.${heard}`;
+    else incompleteReason = `A technical problem was logged before any contribution was captured.${heard}`;
   }
 
   const explanations: Record<string, string> = {
     participation: contributedEnough
       ? "Muted invitations were not penalised because this participant had already contributed a fair share."
+      : heardNotTranscribed
+        ? `Estimated from the ${heardSeconds} seconds the microphone was active, because no transcript was captured.`
       : count === 0
         ? "No speech was attributed to this microphone."
         : "Based on contribution count, share of speaking time, and missed invitations while the microphone was available.",

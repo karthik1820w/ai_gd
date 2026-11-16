@@ -26,6 +26,7 @@ export function createRealtimeBuckets() {
   return {
     speaking: createBucket(2, 4),
     transcript: createBucket(10, 30),
+    interim: createBucket(6, 12),
   };
 }
 

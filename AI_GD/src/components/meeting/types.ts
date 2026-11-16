@@ -36,6 +36,7 @@ export type DiscussionInfo = {
 
 export type Segment = {
   id: string;
+  participantId?: string;
   userId: string;
   name: string;
   text: string;
@@ -60,6 +61,8 @@ export type RosterEntry = {
   speaking: boolean;
   micLocked: boolean;
   camLocked?: boolean;
+  /** False when this person's browser cannot transcribe speech. */
+  speechAvailable?: boolean;
   speakingMs: number;
   contributions: number;
   invites: number;
@@ -124,6 +127,8 @@ export type ResultsPerson = {
 
 export type Results = {
   ready: boolean;
+  running?: boolean;
+  error?: string;
   role?: "host" | "participant";
   evaluatedBy?: string;
   formula?: string;

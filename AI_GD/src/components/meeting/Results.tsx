@@ -54,6 +54,9 @@ export function Results({ discussionId, refreshKey }: { discussionId: string; re
   const [data, setData] = useState<ResultsData | null>(null);
   const [tries, setTries] = useState(0);
   const [failed, setFailed] = useState("");
+  const [stalled, setStalled] = useState<{ error: string; role: "host" | "participant" } | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,7 +69,10 @@ export function Results({ discussionId, refreshKey }: { discussionId: string; re
         const body = await response.json();
         if (cancelled) return;
         if (!response.ok) { setFailed(body.error || "Could not load the results."); return; }
-        if (body.ready) { setData(body as ResultsData); setFailed(""); return; }
+        if (body.ready) { setData(body as ResultsData); setFailed(""); setStalled(null); return; }
+        // Scoring is not running and gave a reason: stop waiting and say so.
+        if (!body.running && body.error) { setStalled({ error: body.error, role: body.role === "host" ? "host" : "participant" }); return; }
+        setStalled(null);
       } catch {
         if (cancelled) return;
       }
@@ -75,9 +81,32 @@ export function Results({ discussionId, refreshKey }: { discussionId: string; re
     };
     void load();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [discussionId, refreshKey]);
+  }, [discussionId, refreshKey, retryKey]);
+
+  async function recalculate() {
+    setRetrying(true);
+    try {
+      const response = await fetch(`/api/discussions/${discussionId}/evaluate`, { method: "POST" });
+      if (!response.ok) { const body = await response.json().catch(() => ({})); setStalled({ error: body.error || "Recalculation failed.", role: "host" }); }
+      else { setStalled(null); setTries(0); }
+    } finally {
+      setRetrying(false);
+      setRetryKey((value) => value + 1);
+    }
+  }
 
   if (failed) return <section className="rt-results"><p className="rt-note" role="alert">{failed}</p></section>;
+  if (stalled) {
+    return (
+      <section className="rt-results" role="alert">
+        <h2>The scores could not be generated</h2>
+        <p>{stalled.error}</p>
+        {stalled.role === "host"
+          ? <div className="rt-actions"><button className="rt-btn primary" disabled={retrying} onClick={() => void recalculate()}>{retrying ? "Recalculating…" : "Recalculate scores"}</button></div>
+          : <p className="muted">Ask the host to recalculate the scores. Your words are saved.</p>}
+      </section>
+    );
+  }
   if (!data?.ready) {
     return (
       <section className="rt-results" aria-live="polite">
@@ -89,6 +118,9 @@ export function Results({ discussionId, refreshKey }: { discussionId: string; re
 
   const isHost = data.role === "host";
   const people = data.people ?? [];
+  if (people.length === 0) {
+    return <section className="rt-results"><h2>No participants to score</h2><p className="muted">Nobody other than the host joined this discussion, so there are no scores or transcripts.</p></section>;
+  }
   const mineId = !isHost ? people[0]?.participantId : undefined;
   const summary = data.summary;
   const turns = data.transcript?.turns ?? [];

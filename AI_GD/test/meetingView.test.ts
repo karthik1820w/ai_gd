@@ -15,24 +15,32 @@ const base = {
 describe("seats", () => {
   const roster = [person("host", { isHost: true }), person("a", { speakingMs: 30_000 }), person("b", { speakingMs: 0 }), person("c", { connected: false })];
 
-  it("seats connected participants only, and not the host, in the round layout", () => {
-    const { seats, selfIndex } = buildSeats({ ...base, roster, self: { userId: "host", name: "Host", isHost: true } });
-    assert.deepEqual(seats.map((s) => s.userId), ["a", "b"]);
-    assert.equal(selfIndex, null);
+  it("seats every connected person, the host included, so participants can always see the host", () => {
+    const asHost = buildSeats({ ...base, roster, self: { userId: "host", name: "Host", isHost: true } });
+    assert.deepEqual(asHost.seats.map((s) => s.userId).sort(), ["a", "b", "host"]);
+    const asGuest = buildSeats({ ...base, roster, self: { userId: "a", name: "A", isHost: false } });
+    const host = asGuest.seats.find((s) => s.isHost)!;
+    assert.ok(host, "the host has a seat in a participant's round-table view");
+    assert.equal(host.isSelf, false);
   });
 
   it("puts a participant's own seat in the ring, even before the roster lists them", () => {
     const { seats, selfIndex } = buildSeats({ ...base, roster: [person("host", { isHost: true })], self: { userId: "z", name: "Zed", isHost: false } });
-    assert.equal(seats.length, 1);
-    assert.equal(selfIndex, 0);
-    assert.equal(seats[0].isSelf, true);
+    assert.equal(seats.length, 2, "the host and the participant");
+    assert.equal(seats[selfIndex!].isSelf, true);
+    assert.equal(seats[selfIndex!].userId, "z");
   });
 
-  it("brings the host to the centre while the host speaks, and shows the host in other layouts", () => {
-    const round = buildSeats({ ...base, roster, focusId: "host", self: { userId: "a", name: "A", isHost: false } });
-    assert.ok(round.seats.some((s) => s.userId === "host"));
-    const gallery = buildSeats({ ...base, roster, layout: "gallery", self: { userId: "a", name: "A", isHost: false } });
-    assert.ok(gallery.seats.some((s) => s.isHost));
+  it("shows the host in every layout, and shows the host's video when their camera is on", () => {
+    const track = {} as never;
+    const peers = new Map([["host", { userId: "host", name: "Host", videoTrack: track, audioTrack: null, camOn: true, micOn: true }]]);
+    for (const layout of ["round", "speaker", "gallery"] as const) {
+      const { seats } = buildSeats({ ...base, roster, peers, layout, self: { userId: "a", name: "A", isHost: false } });
+      const host = seats.find((s) => s.isHost)!;
+      assert.ok(host, `host seat in ${layout}`);
+      assert.equal(host.camOn, true, `host video in ${layout}`);
+      assert.equal(host.fill, 0, "the host is not scored, so the talk ring stays empty");
+    }
   });
 
   it("shows video only when the camera is on AND a video track exists", () => {

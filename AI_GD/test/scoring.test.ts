@@ -110,3 +110,30 @@ describe("performance scores", () => {
     assert.ok(Math.abs((withMute.overall ?? 0) - expected) < 0.2);
   });
 });
+
+describe("a person who spoke but was not transcribed", () => {
+  const base = {
+    contributions: [], totalSpeakingMs: 90_000, participantCount: 4,
+    missed: { noResponse: 0, muted: 0, technical: 0, hostLocked: 0, disconnect: 0 },
+    mediaReady: true, speechAvailable: true, blockingTechnical: false,
+  };
+  it("is reported as incomplete, with a participation score from speaking time and a clear reason", () => {
+    const r = scoreParticipant({ ...base, speakingMs: 30_000 });
+    assert.equal(r.incomplete, true);
+    assert.equal(r.overall, null);
+    assert.ok(r.participation > 40 && r.participation <= 68, `participation ${r.participation}`);
+    assert.match(r.incompleteReason ?? "", /No words were transcribed/);
+    assert.match(r.incompleteReason ?? "", /30 seconds/);
+    assert.match(r.explanations.participation, /Estimated from the 30 seconds/);
+  });
+  it("scores more speaking time higher, within the cap", () => {
+    const a = scoreParticipant({ ...base, speakingMs: 8_000 }).participation;
+    const b = scoreParticipant({ ...base, speakingMs: 60_000 }).participation;
+    assert.ok(b > a && b <= 68);
+  });
+  it("leaves genuine silence alone", () => {
+    const r = scoreParticipant({ ...base, speakingMs: 1_000 });
+    assert.equal(r.incomplete, false);
+    assert.ok(r.participation < 25);
+  });
+});

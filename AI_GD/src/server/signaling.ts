@@ -5,6 +5,8 @@ import {
   acceptSpeakingTick,
   clearPresence,
   getRateBucket,
+  markVoiceStart,
+  markVoiceStop,
   room,
   sampleNetQuality,
   setPresence,
@@ -15,8 +17,8 @@ import { endDiscussion } from "@/server/evaluate";
 import { muteLivekitAudio, muteLivekitVideo, removeLivekitParticipant } from "@/server/livekit";
 import { startDiscussion } from "@/server/live";
 import { publishRoster } from "@/server/moderator";
-import { emitDiscussion } from "@/server/realtime";
-import { addSegment, scheduleLiveScores, segmentDTO } from "@/server/segments";
+import { emitDiscussion, emitUser } from "@/server/realtime";
+import { addSegmentResult, scheduleLiveScores, segmentDTO } from "@/server/segments";
 import { tokenFromCookie, verifyToken, type TokenUser } from "@/server/token";
 import { createBucket, createRealtimeBuckets, take } from "@/server/rateLimit";
 import { NOTICE } from "@/server/netQuality";
@@ -81,8 +83,8 @@ export function attachSignaling(io: Server) {
       const [segments, messages, events] = await Promise.all([
         prisma.transcriptSegment.findMany({
           where: access.isHost ? { discussionId: access.discussion.id } : { discussionId: access.discussion.id, participantId: ownRow?.id ?? "none" },
-          orderBy: { startedAt: "asc" },
-          take: 300,
+          orderBy: { startedAt: "desc" },
+          take: 500,
           include: { participant: true },
         }),
         prisma.chatMessage.findMany({ where: { discussionId: access.discussion.id }, orderBy: { createdAt: "asc" }, take: 100 }),
@@ -107,7 +109,7 @@ export function attachSignaling(io: Server) {
         ai: aiEnabled(),
         brief,
       });
-      socket.emit("transcript-history", segments.map(segmentDTO));
+      socket.emit("transcript-history", segments.reverse().map(segmentDTO));
       socket.emit("chat-history", messages.map((message) => ({ id: message.id, userId: message.userId, name: message.name, text: message.text, createdAt: message.createdAt.toISOString() })));
       socket.emit("moderator-history", events.reverse().map((event) => ({ id: event.id, situation: event.situation, message: event.message, source: event.source, targetUserId: event.targetUserId, createdAt: event.createdAt.toISOString() })));
       publishRoster(access.discussion.id);
@@ -198,11 +200,18 @@ export function attachSignaling(io: Server) {
     });
 
     socket.on("speaking", async (payload: { speaking?: boolean }) => {
-      if (!take(realtimeBuckets.speaking)) return;
       const discussionId = socket.data.discussionId;
       if (!discussionId) return;
       const speaking = Boolean(payload?.speaking);
       const userId = socket.data.user.id;
+      // "Stopped" is never rate-limited: dropping it would leave a burst open and over-count the time.
+      if (speaking && !take(realtimeBuckets.speaking)) return;
+
+      // Speaking time is the real length of each burst of voice, credited when it ends. This runs before the
+      // floor logic, so someone who talks over another speaker still has their time counted.
+      if (speaking) markVoiceStart(discussionId, userId);
+      else void creditSpeaking(socket, discussionId, markVoiceStop(discussionId, userId));
+
       if (room(discussionId).speaking.has(userId) === speaking) return;
       setSpeaking(discussionId, userId, speaking);
       if (speaking && !room(discussionId).speaking.has(userId)) return;
@@ -211,18 +220,21 @@ export function attachSignaling(io: Server) {
 
       // Tell the room first; the stat write is bookkeeping and must not delay the highlight.
       emitDiscussion(discussionId, "speaking", { userId, speaking });
-      if (speaking && acceptSpeakingTick(discussionId, userId)) {
-        const participantId = socket.data.participantId
-          ?? (await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId, userId } }, select: { id: true } }))?.id;
-        if (participantId) {
-          socket.data.participantId = participantId;
-          void prisma.speakingStat.upsert({
-            where: { participantId },
-            create: { participantId, speakingMs: 1000 },
-            update: { speakingMs: { increment: 1000 } },
-          }).catch((error) => console.error("Could not update speaking time.", error));
-        }
-      }
+      if (speaking) acceptSpeakingTick(discussionId, userId);
+    });
+
+    // Live captions: the words being spoken right now, before they are final. They go to the speaker and the host
+    // only, are never stored, and are replaced by the saved line as soon as it exists.
+    socket.on("interim", async (payload: { text?: string }) => {
+      const discussionId = socket.data.discussionId;
+      if (!discussionId || !take(realtimeBuckets.interim)) return;
+      const text = typeof payload?.text === "string" ? payload.text.replace(/\s+/g, " ").trim().slice(0, 300) : "";
+      const userId = socket.data.user.id;
+      const discussion = await prisma.discussion.findUnique({ where: { id: discussionId }, select: { hostId: true, status: true, transcriptionEnabled: true } });
+      if (!discussion || discussion.status !== "LIVE" || !discussion.transcriptionEnabled || discussion.hostId === userId) return;
+      const caption = { userId, name: socket.data.name ?? socket.data.user.name, text, at: Date.now() };
+      emitUser(discussion.hostId, "interim", caption);
+      emitUser(userId, "interim", caption);
     });
 
     // "Speak": the person accepts the floor. It answers an open invitation straight away,
@@ -235,14 +247,24 @@ export function attachSignaling(io: Server) {
       publishRoster(discussionId);
     });
 
-    socket.on("transcript", async (payload: { text?: string; startedAt?: string; endedAt?: string }) => {
+    // Every spoken line is answered: saved, or the reason it was not. The browser shows that reason, so a
+    // missing transcript is never a mystery.
+    socket.on("transcript", async (payload: { text?: string; startedAt?: string; endedAt?: string }, ack?: (result: { ok: boolean; reason?: string; message?: string; benign?: boolean }) => void) => {
+      const reply = typeof ack === "function" ? ack : () => undefined;
       if (!take(realtimeBuckets.transcript)) {
-        socket.emit("room-error", { error: "Transcript rate limit reached. Please pause briefly and try again." });
+        reply({ ok: false, reason: "rate", message: "Too many lines at once. Speak in shorter sentences.", benign: true });
         return;
       }
-      if (!socket.data.discussionId || !payload?.text) return;
+      if (!socket.data.discussionId) { reply({ ok: false, reason: "not-joined", message: "You have not joined this discussion yet.", benign: false }); return; }
+      if (!payload?.text) { reply({ ok: false, reason: "empty", message: "Nothing to save.", benign: true }); return; }
       logEvent(socket.data.discussionId, "speech", { userId: socket.data.user.id, text: payload.text });
-      await addSegment({ discussionId: socket.data.discussionId, userId: socket.data.user.id, text: payload.text, startedAt: payload.startedAt, endedAt: payload.endedAt });
+      try {
+        const result = await addSegmentResult({ discussionId: socket.data.discussionId, userId: socket.data.user.id, text: payload.text, startedAt: payload.startedAt, endedAt: payload.endedAt });
+        reply(result.ok ? { ok: true } : { ok: false, reason: result.reason, message: result.message, benign: result.benign });
+      } catch (error) {
+        console.error("Could not save a transcript line.", error);
+        reply({ ok: false, reason: "server", message: "The server could not save your words. Type your points instead, and tell the host.", benign: false });
+      }
     });
 
     socket.on("ask-ai", async (payload: { question?: string; share?: boolean }) => {
@@ -430,6 +452,25 @@ export function attachSignaling(io: Server) {
   });
 }
 
+/** Add credited speaking time to a person's running total. Errors are logged, never thrown into the socket. */
+async function creditSpeaking(socket: { data: { participantId?: string; user?: TokenUser } }, discussionId: string, ms: number) {
+  const userId = socket.data.user?.id;
+  if (!userId || ms < 200) return;
+  try {
+    const participantId = socket.data.participantId
+      ?? (await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId, userId } }, select: { id: true } }))?.id;
+    if (!participantId) return;
+    socket.data.participantId = participantId;
+    await prisma.speakingStat.upsert({
+      where: { participantId },
+      create: { participantId, speakingMs: Math.round(ms) },
+      update: { speakingMs: { increment: Math.round(ms) } },
+    });
+  } catch (error) {
+    console.error("Could not update speaking time.", error);
+  }
+}
+
 async function hostDiscussion(socket: { data: { user: TokenUser; discussionId?: string } }) {
   if (!socket.data.discussionId) return null;
   const discussion = await prisma.discussion.findUnique({ where: { id: socket.data.discussionId } });
@@ -441,6 +482,7 @@ async function leave(socket: { id: string; data: { user?: TokenUser; discussionI
   const discussionId = socket.data.discussionId;
   const user = socket.data.user;
   if (!discussionId || !user) return;
+  void creditSpeaking(socket as unknown as { data: { participantId?: string; user?: TokenUser } }, discussionId, markVoiceStop(discussionId, user.id));
   clearPresence(discussionId, user.id, socket.id);
   logEvent(discussionId, "leave", { userId: user.id });
   socket.to(`discussion:${discussionId}`).emit("peer-left", { socketId: socket.id, userId: user.id });

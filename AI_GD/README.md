@@ -198,14 +198,16 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 
 ## Deploying
 
-**Sign-in, dashboards, reports, and live meetings** run on Render. The GitHub Actions Render CI workflow runs type-checking, unit tests, and a production build; the Render Blueprint deploys after those checks pass. Set the required environment variables in Render and open `/api/health` on your deployment to see which setting is missing. The host then signs in with `HOST_EMAIL` and `HOST_PASSWORD`.
+**Sign-in, dashboards, and reports** run on any host. On Vercel, set the required variables, and the `vercel-build` script applies the database schema during each build (so `DATABASE_URL` must be reachable at build time; for Supabase use the **Session pooler** string, because the direct `db.<ref>.supabase.co` host is IPv6-only and Vercel cannot reach it; `DIRECT_URL` is an optional second string for schema pushes if `DATABASE_URL` is the transaction pooler on port 6543). Open `/api/health` on your deployment to see which setting is missing. The host then signs in with `HOST_EMAIL` and `HOST_PASSWORD`.
+
+**Live meetings do not run on Vercel.** They need a long-running Node process for Socket.IO (`server/index.ts`), which Vercel's serverless functions cannot host. Run the whole app on Render instead (this is what `render.yaml` is for), and keep Supabase as the database.
 
 ### Run live meetings on Render + Supabase + LiveKit Cloud
 
 1. **LiveKit Cloud** (free tier): create a project at https://cloud.livekit.io and copy the WebSocket URL (`wss://...livekit.cloud`), API key and API secret.
 2. **Render**: New -> Blueprint -> pick this repository. If the project sits in a sub-folder of the repo, set **Root Directory** to that folder.
 3. In the Render dashboard set `DATABASE_URL` (Supabase **Session pooler** string), `HOST_EMAIL`, `HOST_PASSWORD`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and optionally `GEMINI_API_KEY`. `JWT_SECRET` is generated for you.
-4. Push to the connected branch. Render deploys after the GitHub Actions checks pass. The start command applies the database schema, so no manual database step is needed. Open `https://<your-app>.onrender.com/api/health` to confirm `"ok": true`.
+4. Deploy. The start command applies the database schema, so no manual database step is needed. Open `https://<your-app>.onrender.com/api/health` to confirm `"ok": true`.
 5. Sign in as the host, create a discussion, and share the meeting link. Each participant joins from Chrome or Edge with microphone permission.
 
 How each person gets a transcript and a score: every browser transcribes its own microphone (Chrome/Edge speech recognition) and sends the lines to the server tagged with that person. When the host ends the discussion, the server builds each person's transcript and scores it on the six criteria. The host sees every person's transcript and criterion scores on the session page; each participant sees their own on their report.
@@ -280,3 +282,24 @@ The scoring tests cover an on-topic line, an off-topic line, a reply that stays 
 - **Who sees what.** The host sees every participant's live lines, scores and transcript. A participant sees only their own words and scores; no one else's are ever sent to their browser.
 - **Reports (PDF).** Individual: the score, each criterion with its weight, score, points and explanation, the sum that produces the overall score, grade bands, feedback, host actions, and the person's transcript. Combined (host): overview of everyone, group summary, every individual breakdown, and the full transcript. Transcript PDF: the host's is everyone, a participant's is their own. Reports for someone with no captured speech say why, and are never blank.
 - **After pulling this update run `npm run db:push`**: it adds the moderation table and the removal and camera-lock columns.
+
+
+## Transcripts and scores: how they are produced, and what to check when they are missing
+
+- **Participants see the host.** The host has a seat in every layout (marked "host"), with camera and voice, so participants can always see and hear them.
+- **Every spoken line is acknowledged.** The server answers each line with "saved" or the reason it was not (no consent, discussion ended, and so on). A participant sees that reason in red under the controls; otherwise they see "Transcribing · N lines saved". Lines spoken before the room is joined are held and sent afterwards. Timing uses the server clock, so a wrong clock on a participant's computer cannot lose or misplace a line.
+- **Test before joining.** The lobby has a "Test transcription" button that says what the browser heard, or why it heard nothing.
+- **Audio fallback.** If a browser cannot transcribe (Firefox, Safari), keeps failing, or stays silent while the person is clearly talking for 10 seconds, the room switches to short audio clips (cut at pauses, silence is never sent) that Gemini turns into text. This needs `GEMINI_API_KEY`; clips are not stored, and the lobby says so. `AI_MAX_TRANSCRIBE_CALLS_PER_ROOM` (default 1500) caps the cost.
+- **The host sees capture health** in the People list: lines transcribed per person, and a warning for anyone whose browser cannot transcribe or who has been heard speaking with no words captured.
+- **Scoring without AI is fair.** With no AI analysis, a line is no longer discounted as "unverifiable" and relevance is not counted twice inside knowledge. A person who was heard speaking but not transcribed gets an Incomplete report that says so, with participation estimated from speaking time.
+- **If scoring fails** the results screen now says why and the host gets a "Recalculate scores" button, instead of "Preparing…" forever. `/api/health` also reports whether the database matches this version (`"schema": "current"`); if it says `out-of-date`, run `npm run db:push`.
+
+
+## Live transcript and speaking time (update)
+
+- **Live captions.** While someone is speaking, the words so far appear in their own transcript panel and in the host's, marked "speaking now". They are not stored and go to nobody else. The saved line replaces the caption.
+- **Timestamps.** Every line in the live panel shows time since the discussion started. The host can filter the panel by person and download the transcript so far; a participant downloads only their own.
+- **Speaking time is the real length of each burst of voice**, credited when the burst ends (and when someone leaves). Previously one second was added at the start of each burst, so six lines could show as three seconds and distort participation.
+- **Line timing.** A line now starts when the first word of the phrase was heard, not when the browser finished recognising it, so durations and timestamps are accurate.
+- **Rejoining** reloads the newest 500 lines (it used to load the oldest 300).
+- **PDF file names** include the person's name (`quorum-<meeting>-individual-<name>.pdf`), so a host can save every individual report and transcript side by side.

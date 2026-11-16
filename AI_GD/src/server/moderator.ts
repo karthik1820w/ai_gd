@@ -237,6 +237,7 @@ async function emitRoster(discussionId: string) {
       speaking: live?.speaking.has(participant.userId) ?? false,
       micLocked: participant.micLocked,
       camLocked: participant.camLocked,
+      speechAvailable: participant.speechAvailable,
       speakingMs: participant.stat?.speakingMs ?? 0,
       contributions: participant.stat?.contributionCount ?? 0,
       invites: live?.invitesCount.get(participant.userId) ?? 0,

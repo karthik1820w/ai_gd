@@ -29,15 +29,15 @@ type BuildInput = {
 };
 
 /**
- * Who is shown, and how. Participants sit at the table. The host watches rather than sits, so in
- * the round layout the host appears only while speaking (and so takes the centre); in the other
- * layouts the host is one of the tiles.
+ * Who is shown, and how. Everyone connected has a seat, the host included: participants must be able
+ * to see and hear the host at all times, in every layout. The host is marked as the host, and their
+ * talk-time ring stays empty because the host is not scored.
  */
 export function buildSeats(input: BuildInput): { seats: SeatInfo[]; selfIndex: number | null } {
-  const { roster, overrides, self, local, peers, qualities, layout, focusId, inviteUserId, activeSpeakers } = input;
+  const { roster, overrides, self, local, peers, qualities, inviteUserId, activeSpeakers } = input;
   const hostEntry = roster.find((person) => person.isHost);
   const hostId = hostEntry?.userId ?? (self.isHost ? self.userId : null);
-  const includeHost = hostId !== null && (layout !== "round" || focusId === hostId);
+  const includeHost = hostId !== null;
 
   const placeholder = (isHost: boolean): RosterEntry => ({
     userId: self.userId, name: self.name, isHost, connected: true,

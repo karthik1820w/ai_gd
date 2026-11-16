@@ -74,6 +74,7 @@ describe("report PDF", () => {
   it("explains an incomplete report instead of printing an empty one", async () => {
     const out = text((await buildIndividualPdf(data, "p2"))!);
     assert.match(out, /Why this report is incomplete: No speech was captured/);
+    assert.match(out, /PARTICIPATION BASIS/);
     assert.match(out, /No speech was captured\./);
   });
 

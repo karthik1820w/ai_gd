@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { buildTranscript } from "@/server/transcript";
 import { moderationText } from "@/server/moderationText";
-import { buildCombinedPdf, buildIndividualPdf, buildTranscriptPdf, type ReportData, type ReportPerson } from "@/server/reportPdf";
+import { buildCombinedPdf, buildIndividualPdf, buildTranscriptPdf, reportFilename, type ReportData, type ReportPerson } from "@/server/reportPdf";
 
 const INK = "#1c1915";
 const MUTED = "#5e584e";
@@ -64,8 +64,13 @@ export async function renderReport(input: { discussionId: string; type: string; 
     return { error: "You can download only your own report.", status: 403 as const };
   }
   const when = new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(discussion.startedAt ?? discussion.scheduledAt);
-  const slug = discussion.meetingId;
-  const finish = (buffer: Buffer, participantId: string | null) => ({ buffer, filename: `quorum-${slug}-${input.type.toLowerCase()}.pdf`, type: input.type, discussionId: discussion.id, participantId });
+  const finish = (buffer: Buffer, participantId: string | null) => ({
+    buffer,
+    filename: reportFilename(discussion.meetingId, input.type, participantId ? discussion.participants.find((person) => person.id === participantId)?.displayName : null),
+    type: input.type,
+    discussionId: discussion.id,
+    participantId,
+  });
 
   if (input.type === "SUMMARY") {
     const doc = new PDFDocument({ size: "A4", margin: 48, bufferPages: true });
@@ -131,6 +136,7 @@ export function assembleReport(discussion: LoadedDiscussion, when: string): Repo
       speakingMs: evaluation.speakingMs,
       contributions: evaluation.contributionCount,
       participationPercent: evaluation.participationPercent,
+      missedInvites: evaluation.missedCount,
       source: evaluation.source,
       model: evaluation.model,
       criteria: evaluation.parameters.map((parameter) => ({ key: parameter.key, label: parameter.label, weight: parameter.weight, score: parameter.score, explanation: parameter.explanation })),

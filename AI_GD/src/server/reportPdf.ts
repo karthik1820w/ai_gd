@@ -36,6 +36,8 @@ export type ReportPerson = {
   speakingMs: number;
   contributions: number;
   participationPercent: number;
+  /** AI invitations this person did not answer (and were not excused from). */
+  missedInvites?: number;
   source: string;
   model: string | null;
   criteria: ReportCriterion[];
@@ -74,6 +76,15 @@ export type ReportData = {
 };
 
 export type BuildOptions = { compress?: boolean };
+
+/** A file name that is safe on every system, and different for each person so a host can keep them side by side. */
+export function reportFilename(meetingId: string, type: string, personName?: string | null) {
+  const slug = (value: string) => value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase().slice(0, 40);
+  const parts = ["quorum", slug(meetingId) || "discussion", type.toLowerCase()];
+  const who = personName ? slug(personName) : "";
+  if (who) parts.push(who);
+  return `${parts.join("-")}.pdf`;
+}
 
 // ---------- text safety ----------
 // The built-in PDF fonts cover Western European text. Anything else would print as garbage, so it becomes "?".
@@ -245,8 +256,7 @@ function personSection(doc: Doc, person: ReportPerson, options: { speakersInTran
   doc.y = top + 46;
 
   kv(doc, [
-    ["Speaking time", minutes(person.speakingMs)],
-    ["Contributions", `${person.contributions} ${person.contributions === 1 ? "turn" : "turns"}  ·  ${person.participationPercent}% of the group's speech`],
+    ["Participation basis", `${person.contributions} ${person.contributions === 1 ? "turn" : "turns"}  ·  ${minutes(person.speakingMs)} speaking  ·  ${person.participationPercent}% of the group's speech${person.missedInvites ? `  ·  ${person.missedInvites} AI ${person.missedInvites === 1 ? "invitation" : "invitations"} not answered` : ""}`],
     ["Scored by", person.source === "gemini" ? `Gemini${person.model ? ` (${person.model})` : ""}` : "Built-in heuristic scoring (no AI model was available)"],
   ]);
 

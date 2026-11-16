@@ -1,6 +1,7 @@
 import { createMeter, sample, type NetMeter, type NetQualityLevel } from "./netQuality.ts";
 import { createBucket, type TokenBucket } from "./rateLimit.ts";
 import type { ParticipantTurnState } from "./fairTurn.ts";
+import { voiceStart, voiceStop, type VoiceClock } from "./speakingClock.ts";
 
 export type MediaState = {
   socketId: string;
@@ -39,6 +40,8 @@ export type Room = {
   invitesCount: Map<string, number>;
   lastSpokeAtMap: Map<string, number>;
   rateBuckets: Map<string, TokenBucket>;
+  /** When each person's current burst of voice began (separate from who holds the floor). */
+  voiceSince: VoiceClock;
 };
 
 const rooms = new Map<string, Room>();
@@ -62,6 +65,7 @@ export function room(discussionId: string): Room {
       invitesCount: new Map(),
       lastSpokeAtMap: new Map(),
       rateBuckets: new Map(),
+      voiceSince: new Map(),
     };
     rooms.set(discussionId, current);
   }
@@ -123,6 +127,17 @@ export function speakStop(discussionId: string, userId: string): boolean {
     return true;
   }
   return false;
+}
+
+/** Voice began for this person. Counts even when someone else holds the floor. */
+export function markVoiceStart(discussionId: string, userId: string, now = Date.now()) {
+  voiceStart(room(discussionId).voiceSince, userId, now);
+}
+
+/** Voice ended. Returns the milliseconds of speaking to add to this person's total. */
+export function markVoiceStop(discussionId: string, userId: string, now = Date.now()): number {
+  const current = rooms.get(discussionId);
+  return current ? voiceStop(current.voiceSince, userId, now) : 0;
 }
 
 export function raiseHand(discussionId: string, userId: string): boolean {

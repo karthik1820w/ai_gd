@@ -32,3 +32,18 @@ describe("Gemini three-pillar scoring", () => {
     assert.equal(result.overall, Math.round(55 * result.weights[1]));
   });
 });
+
+describe("scoring without an AI model", () => {
+  const line = { understanding: 90, reasoning: 76, originality: 50, accuracy: "unverifiable", relevance: "HIGHLY_RELEVANT", respondsToOthers: false };
+  it("does not mark down a strong on-topic line just because nothing could be fact-checked", () => {
+    const heuristic = scoreAIPillars({ participation: 70, contributions: [line], aiAnalysed: false });
+    const aiPath = scoreAIPillars({ participation: 70, contributions: [line] });
+    assert.equal(heuristic.knowledge, 90, "the line's own knowledge score is used as it is");
+    assert.equal(aiPath.knowledge, 72, "the AI path keeps its accuracy discount for unchecked claims");
+  });
+  it("still ranks a better line above a weaker one", () => {
+    const strong = scoreAIPillars({ participation: 70, contributions: [{ ...line, understanding: 90 }], aiAnalysed: false });
+    const weak = scoreAIPillars({ participation: 70, contributions: [{ ...line, understanding: 24, relevance: "IRRELEVANT" }], aiAnalysed: false });
+    assert.ok(strong.knowledge > weak.knowledge + 40);
+  });
+});

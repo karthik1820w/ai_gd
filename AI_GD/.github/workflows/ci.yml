@@ -1,14 +1,11 @@
-name: Render CI
+name: CI
 
 on:
   push:
   pull_request:
 
-permissions:
-  contents: read
-
 jobs:
-  render-checks:
+  validate:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: postgresql://quorum:quorum@localhost:5432/quorum_ci

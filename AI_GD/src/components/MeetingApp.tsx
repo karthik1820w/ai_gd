@@ -25,6 +25,7 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
   const [audioId, setAudioId] = useState("");
   const [videoId, setVideoId] = useState("");
   const [aiOn, setAiOn] = useState(Boolean(discussion.aiEnabled));
+  const [speechTest, setSpeechTest] = useState<{ state: "idle" | "listening" | "heard" | "error"; text: string }>({ state: "idle", text: "" });
   const [brief] = useState<TopicBrief | null>(discussion.brief ?? null);
   const [mediaHealth, setMediaHealth] = useState<MediaHealth>({ ready: false, error: "Checking media server status…" });
   const previewRef = useRef<HTMLVideoElement>(null);
@@ -118,6 +119,45 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
     if (kind === "audio") { micRef.current = on; setMicOn(on); } else { camRef.current = on; setCamOn(on); }
   }
 
+  // Lets a person confirm, before joining, that their words will be captured.
+  function testSpeech() {
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) {
+      setSpeechTest({ state: "error", text: aiOn
+        ? "This browser cannot transcribe speech. Short clips of your microphone will be turned into text by the AI instead, so you can still take part."
+        : "This browser cannot transcribe speech. Use Chrome or Edge, or you will only be able to type your points." });
+      return;
+    }
+    const recognition = new Recognition();
+    recognition.lang = "en-IN";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    let heard = "";
+    setSpeechTest({ state: "listening", text: "Say a sentence now…" });
+    recognition.onresult = (event) => {
+      heard = "";
+      for (let index = 0; index < event.results.length; index += 1) heard += `${event.results[index][0]?.transcript ?? ""} `;
+      setSpeechTest({ state: "listening", text: heard.trim() });
+    };
+    recognition.onerror = (event) => {
+      const kind = event.error ?? "unknown";
+      const why: Record<string, string> = {
+        "not-allowed": "Speech recognition was blocked. Allow the microphone for this site.",
+        "service-not-allowed": "Speech recognition was blocked. Allow the microphone for this site.",
+        network: "Speech recognition could not reach its service. Check your connection.",
+        "audio-capture": "No microphone was available to the speech recogniser. Check which microphone is selected.",
+        "language-not-supported": "This browser does not support the speech language. It will fall back to general English.",
+      };
+      if (kind === "no-speech" || kind === "aborted") return;
+      setSpeechTest({ state: "error", text: `${why[kind] ?? `Speech recognition failed (${kind}).`}${aiOn ? " If this keeps happening, the AI will transcribe short audio clips instead." : ""}` });
+    };
+    recognition.onend = () => setSpeechTest((current) => current.state === "listening"
+      ? heard.trim() ? { state: "heard", text: heard.trim() } : { state: "error", text: "Nothing was heard. Check the microphone level bar above, then try again." }
+      : current);
+    try { recognition.start(); } catch { setSpeechTest({ state: "error", text: "Could not start speech recognition. Reload the page and try again." }); return; }
+    window.setTimeout(() => { try { recognition.stop(); } catch { /* already stopped */ } }, 8000);
+  }
+
   async function join(event: FormEvent) {
     event.preventDefault();
     if (joining) return;
@@ -203,9 +243,16 @@ export function MeetingApp({ discussion, user, code }: { discussion: DiscussionI
               <button type="button" className="btn btn-ghost" onClick={() => togglePreview("video", !camOn)}>{camOn ? "Camera on" : "Camera off"}</button>
             </div>
             {note && <p className="muted" role="note">{note}</p>}
+            {discussion.transcriptionEnabled && !discussion.isHost && (
+              <div>
+                <button type="button" className="btn btn-ghost" onClick={testSpeech} disabled={speechTest.state === "listening"}>{speechTest.state === "listening" ? "Listening…" : "Test transcription"}</button>
+                {speechTest.state !== "idle" && <p role={speechTest.state === "error" ? "alert" : "status"} className={speechTest.state === "error" ? "error" : "muted"} style={{ marginTop: 8 }}>{speechTest.state === "heard" ? `Heard: “${speechTest.text}”. Transcription works.` : speechTest.text}</p>}
+              </div>
+            )}
             {discussion.transcriptionEnabled && <label><input type="checkbox" checked={consentT} onChange={(event) => setConsentT(event.target.checked)} /> I agree to live transcription of my microphone and to storing the text for evaluation.</label>}
             {discussion.recordingEnabled && <label><input type="checkbox" checked={consentR} onChange={(event) => setConsentR(event.target.checked)} /> I agree to an audio recording of my microphone being stored for the host.</label>}
             {aiOn && <p className="muted" role="note">AI analysis is enabled. Your transcript may be sent to Google Gemini for analysis and evaluation.</p>}
+            {aiOn && discussion.transcriptionEnabled && !discussion.isHost && <p className="muted" role="note">If your browser cannot transcribe speech, short clips of your microphone are sent to Google Gemini to be turned into text. The clips are not stored.</p>}
             <p className="muted">Speech is recognised in this browser and attributed to you. Only you and the host can see your transcript and your scores.</p>
             {error && <p className="error" role="alert">{error}</p>}
             <button className="btn btn-primary" disabled={joining}>{joining ? "Joining…" : "Join meeting"}</button>

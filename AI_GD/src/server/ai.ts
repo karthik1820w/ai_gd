@@ -135,10 +135,10 @@ function validateJsonResponse(text: string) {
 export async function complete(
   system: string,
   user: string,
-  options: { tier?: GeminiTier; timeoutMs?: number; retries?: number; responseSchema?: Record<string, unknown>; roomId?: string; jsonMode?: boolean } = {},
+  options: { tier?: GeminiTier; timeoutMs?: number; retries?: number; responseSchema?: Record<string, unknown>; roomId?: string; jsonMode?: boolean; audio?: { mimeType: string; base64: string } } = {},
 ) {
   if (!aiEnabled()) return null;
-  const task = system.match(/^TASK:\s*(BRIEF|UTTERANCE|EVALUATION|ANSWER|MODERATOR)\b/)?.[1] || "UTTERANCE";
+  const task = system.match(/^TASK:\s*(BRIEF|UTTERANCE|EVALUATION|ANSWER|MODERATOR|TRANSCRIBE)\b/)?.[1] || "UTTERANCE";
   const tier = options.tier || (task === "BRIEF" || task === "EVALUATION" ? "final" : "flash");
   const key = keyFor(tier);
   if (!key) return null;
@@ -174,7 +174,7 @@ export async function complete(
           }
           const body: Record<string, unknown> = {
             systemInstruction: { parts: [{ text: systemInstruction }] },
-            contents: [{ role: "user", parts: [{ text: user }] }],
+            contents: [{ role: "user", parts: [{ text: user }, ...(options.audio ? [{ inlineData: { mimeType: options.audio.mimeType, data: options.audio.base64 } }] : [])] }],
             generationConfig,
           };
           if (groundedAnswer) body.tools = [{ google_search: {} }];

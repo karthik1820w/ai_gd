@@ -44,9 +44,18 @@ export function scoreAIPillars(input: {
   participation: number;
   examiner?: { knowledge?: number; thinking?: number };
   weights?: AIWeights;
+  /**
+   * False when no AI model analysed any line (heuristic scoring only). Then nothing was checked for accuracy,
+   * so lines are not discounted as "unverifiable", and relevance is not counted a second time inside knowledge
+   * (it already has its own 25% criterion and already shaped each line's knowledge score).
+   */
+  aiAnalysed?: boolean;
 }) {
   const contributions = input.contributions;
-  const perPointKnowledge = contributions.length
+  const aiAnalysed = input.aiAnalysed ?? true;
+  const perPointKnowledge = contributions.length && !aiAnalysed
+    ? contributions.reduce((sum, point) => sum + clamp(point.understanding ?? 50), 0) / contributions.length
+    : contributions.length
     ? contributions.reduce((sum, point) => {
         const understanding = clamp(point.understanding ?? 50) / 100;
         const accuracy = ACCURACY_FACTORS[point.accuracy || "unverifiable"] ?? ACCURACY_FACTORS.unverifiable;
