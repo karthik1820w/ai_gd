@@ -7,6 +7,7 @@ services:
     name: quorum
     runtime: node
     plan: free
+    rootDir: .
     buildCommand: npm ci && npm run build
     # `start:deploy` applies the Prisma schema before booting the custom
     # Next.js + Socket.IO server, so a fresh database works on the first deploy.

@@ -80,7 +80,7 @@ The host can correct a score. The correction requires a reason, and the original
 
 With no Gemini key, AI analysis, topic briefings, Q&A, and final AI evaluation are disabled or fall back to the built-in heuristics. The UI and reports identify heuristic results; they do not represent them as Gemini output.
 
-Create a Gemini API key in Google AI Studio and place it in `AI_GD/.env`. A single `GEMINI_API_KEY` works for both live and final tasks; separate keys and model names are optional:
+Create a Gemini API key in Google AI Studio and place it in `.env` at the repository root. A single `GEMINI_API_KEY` works for both live and final tasks; separate keys and model names are optional:
 
 ```
 AI_ENABLED=on
@@ -133,7 +133,7 @@ Accept the browser's certificate warning. Allow ports 3000/TCP, 7880/TCP, 7881/T
 
 ## Start again tomorrow
 
-From the `AI_GD` folder:
+From the repository root:
 
 ```bash
 npm install
