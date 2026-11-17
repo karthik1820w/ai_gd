@@ -1,14 +1,11 @@
-name: Render CI
+name: CI
 
 on:
   push:
   pull_request:
 
-permissions:
-  contents: read
-
 jobs:
-  render-checks:
+  validate:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: postgresql://quorum:quorum@localhost:5432/quorum_ci
@@ -19,18 +16,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: AI_GD/package-lock.json
-      - name: Install PDF test tools
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+          cache-dependency-path: package-lock.json
       - name: Install dependencies
         run: npm ci
-        working-directory: AI_GD
       - name: Typecheck application and server
         run: npm run typecheck
-        working-directory: AI_GD
       - name: Run unit tests
         run: npm test
-        working-directory: AI_GD
       - name: Build production app
         run: npm run build
-        working-directory: AI_GD
