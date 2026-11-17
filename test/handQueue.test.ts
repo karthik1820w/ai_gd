@@ -133,10 +133,10 @@ describe("host drops out: the AI takes over, the meeting goes on", () => {
   });
 
   it("the AI takes over once the host has been gone past the grace period", () => {
-    let watch: HostWatch = nextHostWatch(present, false, 1_000);
+    let watch = nextHostWatch(present, false, 1_000);
     watch = nextHostWatch(watch, false, 1_000 + HOST_AWAY_GRACE_MS);
     assert.equal(watch.away, true);
-    assert.equal((watch as { changed: boolean }).changed, true);
+    assert.equal(watch.changed, true);
   });
 
   it("only reports the change once, then stays away until the host is back", () => {
