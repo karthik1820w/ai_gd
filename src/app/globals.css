@@ -264,3 +264,40 @@ a.rt-btn { text-decoration: none; }
 .rt-queue-pos { flex: none; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px; background: var(--rt-gold); color: #fff; }
 .rt-queue-name { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .rt-away { margin: 8px auto 0; max-width: 960px; padding: 10px 14px; border: 1px solid var(--rt-line); border-left: 4px solid var(--rt-gold); border-radius: 12px; background: var(--rt-card); font-size: 14px; text-align: center; }
+
+/* 3D table layout */
+.rt3d-frame { position: relative; width: 100%; max-width: 880px; aspect-ratio: 16 / 10; min-height: 360px; max-height: 70vh; border-radius: 22px; overflow: hidden; border: 1px solid var(--rt-line); background: radial-gradient(120% 90% at 50% 38%, var(--rt-card), var(--rt-bg)); }
+.rt3d-loading { animation: rt3d-breathe 1.4s ease-in-out infinite; }
+@keyframes rt3d-breathe { 0%, 100% { opacity: .65; } 50% { opacity: 1; } }
+.rt3d-canvas { position: absolute; inset: 0; }
+.rt3d-canvas canvas { display: block; width: 100%; height: 100%; }
+.rt3d-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.rt3d-label { position: absolute; left: 0; top: 0; opacity: 0; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 3px 9px; border-radius: 10px; background: color-mix(in srgb, var(--rt-card) 92%, transparent); border: 1px solid var(--rt-line); color: var(--rt-ink); font-size: 12px; line-height: 1.3; white-space: nowrap; will-change: transform; transition: opacity .15s ease; }
+.rt3d-label strong { font-weight: 600; }
+.rt3d-label.is-speaking { border-color: var(--rt-speak); box-shadow: 0 0 0 2px var(--rt-speak); }
+.rt3d-label.is-speaking strong { font-weight: 800; }
+.rt3d-label.is-invited { border-color: var(--rt-gold); box-shadow: 0 0 0 2px var(--rt-gold); }
+.rt3d-label.is-away { filter: saturate(.4); }
+.rt3d-meta { display: inline-flex; align-items: center; gap: 5px; color: var(--rt-muted); font-size: 11px; }
+.rt3d-meta svg { color: var(--rt-ink); }
+.rt3d-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rt-good); display: inline-block; }
+.rt3d-dot.q-fair { background: var(--rt-gold); }
+.rt3d-dot.q-poor { background: var(--rt-bad); }
+.rt3d-wrap { width: 100%; max-width: 880px; display: flex; flex-direction: column; gap: 10px; }
+.rt3d-banner { text-align: center; padding: 8px 12px; min-height: 64px; border: 1px solid var(--rt-line); border-radius: 14px; background: var(--rt-card); display: grid; place-content: center; transition: opacity .25s ease; }
+.rt3d-banner h2 { font-size: 18px; }
+.rt3d-banner p { margin: 2px 0 0; font-size: 13px; color: var(--rt-muted); }
+.rt3d-banner.is-hidden { opacity: 0; pointer-events: none; }
+.rt3d-cut { position: absolute; inset: 0; background: var(--rt-bg); pointer-events: none; animation: rt3d-veil .2s ease-out forwards; }
+@keyframes rt3d-veil { from { opacity: .85; } to { opacity: 0; } }
+.rt3d-fallback { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.rt3d-notice { margin: 0; font-size: 13px; color: var(--rt-muted); text-align: center; }
+.rt3d-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; list-style: none; }
+/* Big rooms: fewer words on the labels, so names do not pile up. The hidden list for screen readers always has everyone. */
+.rt3d-frame[data-density="compact"] .rt3d-label { font-size: 10px; padding: 2px 6px; }
+.rt3d-frame[data-density="compact"] .rt3d-time, .rt3d-frame[data-density="compact"] .rt3d-dot { display: none; }
+.rt3d-frame[data-density="dense"] .rt3d-label { font-size: 10px; padding: 2px 6px; }
+.rt3d-frame[data-density="dense"] .rt3d-label:not(.is-notable) { display: none; }
+.rt3d-frame[data-density="dense"] .rt3d-time, .rt3d-frame[data-density="dense"] .rt3d-dot { display: none; }
+@media (max-width: 640px) { .rt3d-frame { aspect-ratio: 4 / 5; min-height: 360px; } .rt3d-label { font-size: 11px; padding: 2px 7px; } }
+@media (prefers-reduced-motion: reduce) { .rt3d-loading { animation: none; } .rt3d-banner, .rt3d-label { transition: none; } }

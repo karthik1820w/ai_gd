@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
-import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { buildCombinedPdf, buildIndividualPdf, buildTranscriptPdf, criteriaMath, pdfSafe, type ReportData, type ReportPerson } from "../src/server/reportPdf.ts";
 
 const criteria = [
@@ -36,25 +39,16 @@ const data: ReportData = {
   transcriptPurged: false,
 };
 
-async function text(buffer: Buffer) {
-  const loadingTask = getDocument({ data: new Uint8Array(buffer) });
-  const pdf = await loadingTask.promise;
-  try {
-    const pages: string[] = [];
-    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
-      const page = await pdf.getPage(pageNumber);
-      const content = await page.getTextContent();
-      pages.push(content.items.map((item) => "str" in item ? `${item.str}${item.hasEOL ? "\n" : " "}` : "").join(""));
-    }
-    return pages.join("\f");
-  } finally {
-    await loadingTask.destroy();
-  }
+function text(buffer: Buffer) {
+  const dir = mkdtempSync(path.join(tmpdir(), "pdf-"));
+  const file = path.join(dir, "r.pdf");
+  writeFileSync(file, buffer);
+  return execFileSync("pdftotext", ["-layout", file, "-"]).toString();
 }
 
 describe("report PDF", () => {
   it("shows the score, the weights, the arithmetic and the explanations", async () => {
-    const out = await text((await buildIndividualPdf(data, "p1"))!);
+    const out = text((await buildIndividualPdf(data, "p1"))!);
     assert.match(out, /Individual performance report/);
     assert.match(out, /Score breakdown/);
     assert.match(out, /Communication and clarity\s+20%\s+84/);
@@ -65,27 +59,27 @@ describe("report PDF", () => {
   });
 
   it("includes the person's transcript and marks recording-derived lines", async () => {
-    const out = await text((await buildIndividualPdf(data, "p1"))!);
+    const out = text((await buildIndividualPdf(data, "p1"))!);
     assert.match(out, /Transcript \(what this score is based on\)/);
-    assert.match(out, /\[00:06\]\s+Regulation is needed because evidence shows bias/);
+    assert.match(out, /\[00:06\] Regulation is needed because evidence shows bias/);
     assert.match(out, /\(from recording\)/);
   });
 
   it("never includes another person's words in an individual report", async () => {
-    const out = await text((await buildIndividualPdf(data, "p1"))!);
+    const out = text((await buildIndividualPdf(data, "p1"))!);
     assert.doesNotMatch(out, /unregulated/);
     assert.doesNotMatch(out, /Ravi/);
   });
 
   it("explains an incomplete report instead of printing an empty one", async () => {
-    const out = await text((await buildIndividualPdf(data, "p2"))!);
+    const out = text((await buildIndividualPdf(data, "p2"))!);
     assert.match(out, /Why this report is incomplete: No speech was captured/);
     assert.match(out, /PARTICIPATION BASIS/);
     assert.match(out, /No speech was captured\./);
   });
 
   it("records a removal and the host's actions in that person's report", async () => {
-    const out = await text((await buildIndividualPdf(data, "p3"))!);
+    const out = text((await buildIndividualPdf(data, "p3"))!);
     assert.match(out, /Removed by the host/);
     assert.match(out, /Repeatedly interrupting others/);
     assert.match(out, /Host actions recorded for this person/);
@@ -93,39 +87,39 @@ describe("report PDF", () => {
   });
 
   it("combined report has an overview, every person's breakdown, and the full transcript", async () => {
-    const out = await text((await buildCombinedPdf(data))!);
+    const out = text((await buildCombinedPdf(data))!);
     assert.match(out, /Combined performance report/);
     assert.match(out, /Overview/);
     for (const name of ["Kumar", "Meena", "Ravi"]) assert.match(out, new RegExp(name));
     assert.match(out, /Removed/);
     assert.match(out, /Group summary/);
     assert.match(out, /Full discussion transcript/);
-    assert.match(out, /Ravi:\s+I think everything should stay unregulated/);
+    assert.match(out, /Ravi: I think everything should stay unregulated/);
     // Not the one-line-per-person stub that the earlier version produced.
     assert.ok(out.split("\n").length > 80);
   });
 
   it("transcript PDF: host sees everyone, a participant only their own", async () => {
-    const host = await text((await buildTranscriptPdf(data, {}))!);
-    assert.match(host, /Kumar:\s+Regulation/);
-    assert.match(host, /Ravi:\s+I think/);
-    const mine = await text((await buildTranscriptPdf(data, { participantId: "p1" }))!);
+    const host = text((await buildTranscriptPdf(data, {}))!);
+    assert.match(host, /Kumar: Regulation/);
+    assert.match(host, /Ravi: I think/);
+    const mine = text((await buildTranscriptPdf(data, { participantId: "p1" }))!);
     assert.match(mine, /Small startups need clear/);
     assert.doesNotMatch(mine, /unregulated/);
   });
 
   it("handles a purged transcript and very long transcripts across pages", async () => {
-    const purged = await text((await buildIndividualPdf({ ...data, transcriptPurged: true }, "p1"))!);
+    const purged = text((await buildIndividualPdf({ ...data, transcriptPurged: true }, "p1"))!);
     assert.match(purged, /deleted under this session's retention setting/);
     const long = { ...data, people: [person({ turns: Array.from({ length: 300 }, (_, i) => ({ offsetSec: i * 5, speaker: "Kumar", text: `Point number ${i} about regulation of creative tools and fair use.`, source: "live" })) })] };
-    const out = await text((await buildIndividualPdf(long, "p1"))!);
+    const out = text((await buildIndividualPdf(long, "p1"))!);
     assert.match(out, /Point number 299/);
     assert.match(out, /Page \d+ of \d+/);
   });
 
   it("has no blank pages: the page count in the footer matches the real page count", async () => {
     for (const buffer of [(await buildIndividualPdf(data, "p1"))!, (await buildCombinedPdf(data))!, (await buildTranscriptPdf(data, {}))!]) {
-      const out = await text(buffer);
+      const out = text(buffer);
       const pages = out.split("\f").filter((page) => page.trim().length > 0);
       const declared = Number(out.match(/Page 1 of (\d+)/)![1]);
       assert.equal(pages.length, declared);

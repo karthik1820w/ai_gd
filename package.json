@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@prisma/client": "^6.16.2",
+    "@react-three/fiber": "9.8.2",
     "bcryptjs": "^2.4.3",
     "dotenv": "^17.2.3",
     "jose": "^6.1.0",
@@ -36,6 +37,7 @@
     "recharts": "^2.15.4",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
+    "three": "0.187.0",
     "tsx": "^4.20.5",
     "zod": "^4.6.7"
   },
@@ -46,8 +48,8 @@
     "@types/pdfkit": "^0.13.9",
     "@types/react": "^19.1.13",
     "@types/react-dom": "^19.1.9",
+    "@types/three": "0.187.0",
     "autoprefixer": "^10.4.21",
-    "pdfjs-dist": "^6.5.438",
     "postcss": "^8.5.6",
     "selfsigned": "^2.4.1",
     "tailwindcss": "^3.4.17",

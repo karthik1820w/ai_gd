@@ -140,7 +140,7 @@ describe("host drops out: the AI takes over, the meeting goes on", () => {
   });
 
   it("only reports the change once, then stays away until the host is back", () => {
-    let watch: HostWatch & { changed: boolean } = nextHostWatch(present, false, 0);
+    let watch = nextHostWatch(present, false, 0);
     watch = nextHostWatch(watch, false, HOST_AWAY_GRACE_MS);
     watch = nextHostWatch(watch, false, HOST_AWAY_GRACE_MS + 60_000);
     assert.equal(watch.away, true);
@@ -148,7 +148,7 @@ describe("host drops out: the AI takes over, the meeting goes on", () => {
   });
 
   it("hands back when the host returns", () => {
-    let watch: HostWatch & { changed: boolean } = nextHostWatch(present, false, 0);
+    let watch = nextHostWatch(present, false, 0);
     watch = nextHostWatch(watch, false, HOST_AWAY_GRACE_MS);
     watch = nextHostWatch(watch, true, HOST_AWAY_GRACE_MS + 5_000);
     assert.equal(watch.away, false);

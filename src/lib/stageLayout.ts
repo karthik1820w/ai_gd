@@ -2,15 +2,16 @@
  * Layout maths for the meeting stage. Pure and framework-free so it can be tested.
  */
 
-export type LayoutMode = "round" | "speaker" | "gallery";
+export type LayoutMode = "round" | "speaker" | "gallery" | "table3d";
 export const LAYOUTS: Array<{ id: LayoutMode; label: string }> = [
   { id: "round", label: "Round table" },
   { id: "speaker", label: "Speaker focus" },
   { id: "gallery", label: "Gallery" },
+  { id: "table3d", label: "3D table" },
 ];
 
 export function isLayoutMode(value: unknown): value is LayoutMode {
-  return value === "round" || value === "speaker" || value === "gallery";
+  return value === "round" || value === "speaker" || value === "gallery" || value === "table3d";
 }
 
 /**

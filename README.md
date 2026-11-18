@@ -80,7 +80,7 @@ The host can correct a score. The correction requires a reason, and the original
 
 With no Gemini key, AI analysis, topic briefings, Q&A, and final AI evaluation are disabled or fall back to the built-in heuristics. The UI and reports identify heuristic results; they do not represent them as Gemini output.
 
-Create a Gemini API key in Google AI Studio and place it in `.env` at the repository root. A single `GEMINI_API_KEY` works for both live and final tasks; separate keys and model names are optional:
+Create a Gemini API key in Google AI Studio and place it in `AI_GD/.env`. A single `GEMINI_API_KEY` works for both live and final tasks; separate keys and model names are optional:
 
 ```
 AI_ENABLED=on
@@ -133,7 +133,7 @@ Accept the browser's certificate warning. Allow ports 3000/TCP, 7880/TCP, 7881/T
 
 ## Start again tomorrow
 
-From the repository root:
+From the `AI_GD` folder:
 
 ```bash
 npm install
@@ -265,7 +265,7 @@ The scoring tests cover an on-topic line, an off-topic line, a reply that stays 
 
 ## The meeting room
 
-- **Layouts.** Round table (default), Speaker focus, and Gallery. Each person picks their own, and it is remembered. Whoever speaks moves to the centre of the table; a short hold stops it jumping on a cough. Three reading modes (Sage, Paper, Night).
+- **Layouts.** Round table (default), Speaker focus, Gallery, and 3D table. Each person picks their own, and it is remembered. In the 2D layouts whoever speaks moves to the centre of the table; a short hold stops it jumping on a cough. Three reading modes (Sage, Paper, Night).
 - **Video in the seat.** A person's camera shows inside their circle. The ring around the circle fills as they reach a fair share of the talking time; the dot shows connection quality.
 - **AI invitations.** When nobody has spoken for 5 seconds the AI invites someone: the person whose hand went up first, or with no hands up the connected person who has spoken least. The centre shows "AI invites someone in Ns" and then the invited person's countdown. If they do not reply, the next-quietest person is asked, and so on until somebody speaks.
 - **Host panel.** Room code, End and evaluate, weak connections, every person's live scores, focus keywords, topic primer, all points raised.
@@ -333,3 +333,15 @@ The scoring tests cover an on-topic line, an off-topic line, a reply that stays 
 - **Automatic end.** The meeting ends when its scheduled duration is up, with the host connected or not. If the host ends it, every browser is closed at once, and a browser that reconnects afterwards is told the meeting is over. The media room is closed a few seconds later.
 - **Camera.** There is no host control over a camera. The host can mute a microphone or remove someone.
 - **Floor safety.** While speaking, the browser repeats "speaking" every 3 seconds. A floor with no report for 12 seconds is released, so a lost message can never lock the room.
+
+## The 3D table layout
+
+A fourth layout that draws the room as a 3D round table with an original cartoon character seated for every person. It is a pure view: it reads the same `seats`, `focusId`, `selfIndex` and centre content as the other layouts, opens no socket, makes no request and never touches audio or video, so choosing it changes nothing in the meeting or the backend.
+
+- **Seating** uses the same `ringPositions` as the 2D round table, so everyone sees the same order and your own seat is nearest the camera. The ring grows with the head-count, for up to 40 people.
+- **Focus.** When someone speaks, the camera glides to their character; when focus clears it returns to the overview. It uses the existing `FocusTracker` (a new speaker must keep talking for 0.4 s, focus is held for 1.5 s after they stop), so the camera can start moving up to about 0.65 s after someone begins to speak. With reduced motion the camera cuts instead of gliding.
+- **Characters** are procedural and look the same on every screen, picked from the user id (never the name). They show speaking (a looped mouth and a soft beam; this is not lip-sync), raised hand, microphone off, invited (gold ring), away (see-through), connection quality and talk share. Camera video is not shown in 3D.
+- **Labels** are real page text above each head. In rooms above 12 they get shorter, and above 24 only people who are speaking, invited, have a hand up, or are you get one. A hidden list for screen readers always names everyone.
+- **Quality** steps down by itself (shadows, then detail) if frames are slow, and big rooms start on a cheaper tier.
+- **Fallback.** With no WebGL, or if the graphics context is lost, the round table is shown with a notice. The saved layout choice is not changed.
+- **Code** lives in `src/components/meeting/table3d/` (pure maths in `seat3d.ts`, tested in `test/seat3d.test.ts`). It is loaded only when picked, so three.js is not in the rest of the room. Dependencies: `three` 0.187.0 and `@react-three/fiber` 9.8.2 (exact versions).
