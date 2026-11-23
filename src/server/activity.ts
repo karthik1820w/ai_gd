@@ -106,17 +106,17 @@ export function setSpeaking(discussionId: string, userId: string, speaking: bool
 /**
  * Authoritative floor request. Rejects if another speaker currently holds the floor.
  */
-export function speakStart(discussionId: string, userId: string): boolean {
+export function speakStart(discussionId: string, userId: string, allowInterrupt = false): boolean {
   const current = room(discussionId);
   const media = current.presence.get(userId);
   if (!media?.connected) return false;
 
   // Floor is already held by someone else
-  if (current.floor && current.floor.userId !== userId) {
+  if (current.floor && current.floor.userId !== userId && !allowInterrupt) {
     return false;
   }
 
-  if (!current.floor) {
+  if (!current.floor || allowInterrupt) {
     current.floor = { userId, since: Date.now() };
     current.turns.set(userId, (current.turns.get(userId) ?? 0) + 1);
   }
@@ -211,6 +211,17 @@ export function otherSpeaker(discussionId: string, userId: string): string | nul
   if (holder && holder !== userId && current.speaking.has(holder) && current.presence.get(holder)?.connected) return holder;
   for (const id of current.speaking) if (id !== userId && current.presence.get(id)?.connected) return id;
   return null;
+}
+
+/** The host is always allowed to speak. Participants need a live host/AI invitation,
+ * or must already own the floor so a brief mic toggle does not lose their turn. */
+export function hasFloorAccess(discussionId: string, userId: string, isHost = false, now = Date.now()): boolean {
+  if (isHost) return true;
+  const current = rooms.get(discussionId);
+  if (!current) return false;
+  if (current.floor?.userId === userId) return true;
+  const invite = current.invites.get(userId);
+  return Boolean(invite && invite.until > now);
 }
 
 /**

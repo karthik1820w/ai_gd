@@ -399,14 +399,23 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     });
     socket.on("floor-busy", (payload: { holderId?: string; reason?: string }) => {
       const holder = payload.holderId ? nameOf(payload.holderId) : "Someone";
-      if (payload.reason === "mic-blocked") {
+      if (payload.reason === "mic-blocked" || payload.reason === "access-required") {
         // The server refused to open the microphone: bring this browser back in line.
         micRef.current = false;
         setMicOn(false);
         localRef.current.getAudioTracks().forEach((track) => { track.enabled = false; });
         void lkRef.current?.localParticipant.getTrackPublication(Track.Source.Microphone)?.mute();
-        pushToast(`${holder} is speaking. Raise your hand and wait for your turn.`);
+        pushToast(payload.reason === "access-required"
+          ? "Wait for the host or AI moderator to give you the floor before turning on your microphone."
+          : `${holder} is speaking. Raise your hand and wait for your turn.`);
       } else pushToast(`${holder} has the floor. Please wait for them to finish. The host has been told.`);
+    });
+    socket.on("floor-revoked", () => {
+      micRef.current = false;
+      setMicOn(false);
+      localRef.current.getAudioTracks().forEach((track) => { track.enabled = false; });
+      void lkRef.current?.localParticipant.getTrackPublication(Track.Source.Microphone)?.mute();
+      pushToast("Your turn expired. Wait for another invitation before turning on your microphone.");
     });
     socket.on("interruption", (payload: { name: string; holderId?: string }) => pushToast(`${payload.name} is speaking over ${payload.holderId ? nameOf(payload.holderId) : "another speaker"}. You can mute them from the People list.`));
     socket.on("host-notice", (payload: { message: string }) => pushToast(payload.message));
@@ -709,8 +718,16 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     return [...speakingIdsRef.current].some((id) => id !== user.id);
   }
 
+  function hasMicGrant() {
+    return isHost || micOn || speakingIdsRef.current.has(user.id) || Boolean(invite?.userId === user.id && invite.until > Date.now());
+  }
+
   function toggleMic(next = !micRef.current) {
     if (locked && next) return;
+    if (next && !hasMicGrant()) {
+      pushToast("Wait for the host or AI moderator to give you the floor before turning on your microphone.");
+      return;
+    }
     if (next && floorBusy()) {
       pushToast("Someone is speaking. Raise your hand and wait for your turn.");
       return;
@@ -742,6 +759,10 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   }
 
   function speak() {
+    if (!hasMicGrant()) {
+      pushToast("Wait for the host or AI moderator to give you the floor before speaking.");
+      return;
+    }
     if (floorBusy()) {
       pushToast("Someone is speaking. Raise your hand and wait for your turn.");
       return;
@@ -1014,14 +1035,15 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
           {!finished && (
             <>
               <div className="rt-controls">
-                <button className={`rt-btn${micOn ? "" : " on"}`} aria-pressed={micOn} disabled={locked || (!micOn && floorBusy())} title={!micOn && floorBusy() ? "Someone is speaking" : undefined} onClick={() => toggleMic()}>{micOn ? <Mic size={16} /> : <MicOff size={16} />} {micOn ? "Mic on" : "Mic off"}</button>
+                <button className={`rt-btn${micOn ? "" : " on"}`} aria-pressed={micOn} disabled={locked || (!micOn && (floorBusy() || !hasMicGrant()))} title={!micOn && !hasMicGrant() ? "Wait for the host or AI moderator to give you the floor" : !micOn && floorBusy() ? "Someone is speaking" : undefined} onClick={() => toggleMic()}>{micOn ? <Mic size={16} /> : <MicOff size={16} />} {micOn ? "Mic on" : "Mic off"}</button>
                 <button className={`rt-btn${camOn ? "" : " on"}`} aria-pressed={camOn} disabled={camLocked} onClick={() => toggleCam()}>{camOn ? <Video size={16} /> : <VideoOff size={16} />} {camOn ? "Camera on" : "Camera off"}</button>
                 {!isHost && <button className="rt-btn primary" onClick={speak}>Speak</button>}
                 {!isHost && <button className={`rt-btn${hand ? " on" : ""}`} aria-pressed={hand} onClick={toggleHand}><Hand size={16} /> {hand ? "Lower hand" : "Raise hand"}</button>}
                 <button className={`rt-btn${screenOn ? " on" : ""}`} aria-pressed={screenOn} onClick={() => void shareScreen()} aria-label="Share screen"><MonitorUp size={16} /></button>
               </div>
               {locked && <p className="rt-hint">The host has muted your microphone.</p>}
-              {!isHost && !micOn && !locked && floorBusy() && <p className="rt-hint">Someone is speaking. Your microphone can be switched on when they finish.</p>}
+              {!isHost && !micOn && !locked && !hasMicGrant() && <p className="rt-hint">Your microphone opens when the host or AI moderator gives you the floor. You can still raise your hand or type a point.</p>}
+              {!isHost && !micOn && !locked && hasMicGrant() && floorBusy() && <p className="rt-hint">Someone is speaking. Wait until they finish before opening your microphone.</p>}
               {!isHost && hand && myPlace && <p className="rt-hint">Your hand is up. You are number {myPlace.position} in the queue.</p>}
               {!isHost && discussion.transcriptionEnabled && (
                 <p className="rt-note" role={captureProblem ? "alert" : "status"} style={{ textAlign: "center", color: captureProblem ? "var(--rt-bad)" : undefined }}>{captureText}</p>

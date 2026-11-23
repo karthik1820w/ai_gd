@@ -9,6 +9,7 @@ import {
   lowerHand,
   checkFloorTimeout,
   setPresence,
+  hasFloorAccess,
 } from "../src/server/activity.ts";
 
 describe("authoritative floor controller & end-of-turn detection", () => {
@@ -46,6 +47,22 @@ describe("authoritative floor controller & end-of-turn detection", () => {
     // Now User B can take the floor
     const okB = speakStart(dId, "user-B");
     assert.equal(okB, true);
+    assert.equal(room(dId).floor?.userId, "user-B");
+  });
+
+  it("requires a current host or AI invitation before a participant can use the floor", () => {
+    const live = room(dId);
+    assert.equal(hasFloorAccess(dId, "user-A"), false);
+    assert.equal(hasFloorAccess(dId, "user-A", true), true);
+
+    live.invites.set("user-A", { participantId: "participant-A", until: 2_000, sawUnmute: false, windowSec: 20 });
+    assert.equal(hasFloorAccess(dId, "user-A", false, 1_999), true);
+    assert.equal(hasFloorAccess(dId, "user-A", false, 2_000), false);
+  });
+
+  it("lets the host take the floor while a participant is speaking", () => {
+    assert.equal(speakStart(dId, "user-A"), true);
+    assert.equal(speakStart(dId, "user-B", true), true);
     assert.equal(room(dId).floor?.userId, "user-B");
   });
 

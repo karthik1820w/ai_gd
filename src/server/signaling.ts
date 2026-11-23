@@ -6,13 +6,15 @@ import {
   clearPresence,
   consumeHand,
   getRateBucket,
+  hasFloorAccess,
   markVoiceStart,
   markVoiceStop,
   otherSpeaker,
   room,
   sampleNetQuality,
+  speakStart,
+  speakStop,
   setPresence,
-  setSpeaking,
   noteSpeech,
 } from "@/server/activity";
 import { endDiscussion } from "@/server/evaluate";
@@ -157,6 +159,10 @@ export function attachSignaling(io: Server) {
       if (participant.micLocked) socket.emit("force-mute", { locked: true });
       // The camera is always the person's own decision. A lock from an older version is cleared.
       if (participant.camLocked) void prisma.discussionParticipant.update({ where: { id: participant.id }, data: { camLocked: false } }).catch(() => undefined);
+      const requestedAudio = Boolean(payload.audio);
+      const audioHolder = requestedAudio && !isHost ? otherSpeaker(discussionId, user.id) : null;
+      const audioAllowed = !requestedAudio || (isHost || (!audioHolder && hasFloorAccess(discussionId, user.id)));
+      const audio = requestedAudio && audioAllowed;
       const existing = room(discussionId).presence.get(user.id);
       if (existing && existing.socketId !== socket.id) {
         io.to(existing.socketId).emit("replaced");
@@ -165,12 +171,16 @@ export function attachSignaling(io: Server) {
       // Presence first, so everyone sees the person arrive; the database catches up alongside.
       setPresence(discussionId, user.id, {
         socketId: socket.id,
-        audio: Boolean(payload.audio),
+        audio,
         video: Boolean(payload.video),
         hand: Boolean(payload.hand),
         screen: false,
         connected: true,
       });
+      if (requestedAudio && !audioAllowed) {
+        socket.emit("floor-busy", { holderId: audioHolder, reason: audioHolder ? "mic-blocked" : "access-required" });
+        void muteLivekitAudio(discussion.meetingId, user.id, true).catch(() => undefined);
+      }
       publishRoster(discussionId);
       logEvent(discussionId, "join", { id: participant.id, userId: user.id, name: participant.displayName });
       await Promise.all([
@@ -179,7 +189,7 @@ export function attachSignaling(io: Server) {
           data: {
             joinedAt: participant.joinedAt ?? new Date(),
             leftAt: null,
-            mediaReady: Boolean(payload.audio),
+            mediaReady: audio,
             speechAvailable: payload.speechAvailable !== false,
           },
         }),
@@ -200,11 +210,12 @@ export function attachSignaling(io: Server) {
       const discussionId = socket.data.discussionId;
       if (!discussionId) return;
       const current = room(discussionId).presence.get(socket.data.user.id);
-      // While someone is speaking, nobody else can switch a microphone on and talk over them (the host can always
-      // step in, and always has the mute button). The person's own browser refuses first; this is the server's check.
+      // Participants may open a mic only after a host or AI invitation. The host can always step in.
       const turningOn = Boolean(payload?.audio) && !current?.audio;
-      const holder = turningOn && socket.data.user.id !== socket.data.hostId ? otherSpeaker(discussionId, socket.data.user.id) : null;
-      if (holder) {
+      const userId = socket.data.user.id;
+      const holder = turningOn && userId !== socket.data.hostId ? otherSpeaker(discussionId, userId) : null;
+      const hasAccess = hasFloorAccess(discussionId, userId, userId === socket.data.hostId);
+      if (turningOn && (holder || !hasAccess)) {
         setPresence(discussionId, socket.data.user.id, {
           socketId: socket.id,
           audio: false,
@@ -213,7 +224,7 @@ export function attachSignaling(io: Server) {
           screen: Boolean(payload?.screen),
           connected: true,
         });
-        socket.emit("floor-busy", { holderId: holder, reason: "mic-blocked" });
+        socket.emit("floor-busy", { holderId: holder, reason: holder ? "mic-blocked" : "access-required" });
         // Cut the track at the media server too, in case the browser does not honour the notice.
         void prisma.discussion.findUnique({ where: { id: discussionId }, select: { meetingId: true } })
           .then((meeting: { meetingId: string } | null) => meeting && muteLivekitAudio(meeting.meetingId, socket.data.user.id, true))
@@ -241,26 +252,33 @@ export function attachSignaling(io: Server) {
       if (!discussionId) return;
       const speaking = Boolean(payload?.speaking);
       const userId = socket.data.user.id;
-      // "Stopped" is never rate-limited: dropping it would leave a burst open and over-count the time.
+      // A participant cannot claim the floor with a forged activity event or speak before being invited.
+      // Stopped is always accepted so it can release an existing floor even after an invite expires.
+      const media = room(discussionId).presence.get(userId);
+      if (speaking && (!media?.audio || !hasFloorAccess(discussionId, userId, userId === socket.data.hostId))) {
+        socket.emit("floor-busy", { holderId: otherSpeaker(discussionId, userId), reason: "access-required" });
+        return;
+      }
       if (speaking && !take(realtimeBuckets.speaking)) return;
 
-      // Speaking time is the real length of each burst of voice, credited when it ends. This runs before the
-      // floor logic, so someone who talks over another speaker still has their time counted.
-      if (speaking) markVoiceStart(discussionId, userId);
-      else void creditSpeaking(socket, discussionId, markVoiceStop(discussionId, userId));
+      // Ended bursts are always credited, including when a client repeats its stopped event.
+      if (!speaking) void creditSpeaking(socket, discussionId, markVoiceStop(discussionId, userId));
 
       if (room(discussionId).speaking.has(userId) === speaking) {
         // The browser repeats "speaking" every few seconds while someone talks. It keeps the floor alive,
         // so a lost "stopped" message can never leave it held for ever.
         if (speaking) {
           const live = room(discussionId);
+          markVoiceStart(discussionId, userId);
           live.lastTick.set(userId, Date.now());
           live.lastSpeechAt = Date.now();
         }
         return;
       }
-      setSpeaking(discussionId, userId, speaking);
-      if (speaking && !room(discussionId).speaking.has(userId)) {
+      const accepted = speaking
+        ? speakStart(discussionId, userId, userId === socket.data.hostId)
+        : speakStop(discussionId, userId);
+      if (speaking && !accepted) {
         // Someone else holds the floor. The person is asked to wait and the host is told, but only the host mutes.
         const now = Date.now();
         const holder = otherSpeaker(discussionId, userId);
@@ -272,6 +290,7 @@ export function attachSignaling(io: Server) {
         }
         return;
       }
+      if (speaking) markVoiceStart(discussionId, userId);
       if (speaking && consumeHand(discussionId, userId)) {
         emitUser(userId, "hand-lowered", {});
         publishRoster(discussionId);
@@ -307,6 +326,10 @@ export function attachSignaling(io: Server) {
       const holder = socket.data.user.id === socket.data.hostId ? null : otherSpeaker(discussionId, socket.data.user.id);
       if (holder) {
         socket.emit("floor-busy", { holderId: holder, reason: "mic-blocked" });
+        return;
+      }
+      if (!hasFloorAccess(discussionId, socket.data.user.id, socket.data.user.id === socket.data.hostId)) {
+        socket.emit("floor-busy", { reason: "access-required" });
         return;
       }
       noteSpeech(discussionId, socket.data.user.id);

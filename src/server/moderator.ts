@@ -7,6 +7,7 @@ import { FLOOR_STALE_MS, INVITE_AFTER_MS, nextHostWatch, nextSilenceAction, PROM
 import { endDiscussion } from "@/server/evaluate";
 import { pickRandomNextSpeaker } from "@/server/fairTurn";
 import { logEvent } from "@/server/journal";
+import { muteLivekitAudio } from "@/server/livekit";
 
 const TEMPLATES = {
   OPEN_FLOOR: () => "The floor is open. Anyone can add their points.",
@@ -257,6 +258,15 @@ async function closeExpiredInvites(discussionId: string) {
       await prisma.speakingStat.updateMany({ where: { participantId: invite.participantId }, data: { missedOpportunities: { increment: 1 } } });
     }
     live.invites.delete(userId);
+    // An invite is a temporary mic grant. Revoke an unused open mic at expiry on both
+    // the browser and media server so a stale invitation cannot leave audio published.
+    if (media?.audio) {
+      media.audio = false;
+      emitUser(userId, "floor-revoked", {});
+      const discussion = await prisma.discussion.findUnique({ where: { id: discussionId }, select: { meetingId: true } });
+      if (discussion) await muteLivekitAudio(discussion.meetingId, userId, true).catch(() => undefined);
+      emitDiscussion(discussionId, "media", { userId, audio: false, video: media.video, hand: media.hand, screen: media.screen });
+    }
     emitDiscussion(discussionId, "turn-closed", { userId, reason });
   }
 }
