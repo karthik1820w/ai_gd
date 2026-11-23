@@ -24,6 +24,19 @@ export type AssemblerOptions = {
 const norm = (text: string) => text.replace(/\s+/g, " ").trim();
 const words = (text: string) => (text ? text.split(" ").length : 0);
 
+let captureIdSequence = 0;
+
+/** Diagnostic correlation only; this ID is not an authorization or security token. */
+export function createCaptureId(cryptoProvider: { randomUUID?: () => string } | null = globalThis.crypto) {
+  try {
+    if (typeof cryptoProvider?.randomUUID === "function") return cryptoProvider.randomUUID();
+  } catch {
+    // Insecure contexts may expose crypto without allowing randomUUID.
+  }
+  captureIdSequence += 1;
+  return `capture-${Date.now().toString(36)}-${captureIdSequence.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export class SpeechAssembler {
   private readonly quietMs: number;
   private readonly maxHoldMs: number;

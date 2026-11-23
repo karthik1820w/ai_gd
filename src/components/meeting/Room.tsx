@@ -11,7 +11,7 @@ import { buildSeats, centerMessage, clockLabel, connectionText, qualityLabel, sp
 import { formatClock } from "@/lib/format";
 import { SpeechChunker, encodeWav } from "@/lib/audioChunks";
 import { startPcmCapture } from "@/lib/pcmCapture";
-import { SpeechAssembler, type CaptureLine } from "@/lib/speechCapture";
+import { createCaptureId, SpeechAssembler, type CaptureLine } from "@/lib/speechCapture";
 import { Stage } from "./Stage";
 import { RemoteAudio } from "./media";
 import { Results } from "./Results";
@@ -545,7 +545,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
 
     const ship = (line: CaptureLine | null) => {
       if (!line || audioModeRef.current) return;
-      sendLine({ text: line.text, startedAt: new Date(line.startedAt).toISOString(), endedAt: new Date(line.endedAt).toISOString(), diagnosticId: crypto.randomUUID() });
+      sendLine({ text: line.text, startedAt: new Date(line.startedAt).toISOString(), endedAt: new Date(line.endedAt).toISOString(), diagnosticId: createCaptureId() });
     };
     const showCaption = (text: string) => {
       const now = Date.now();

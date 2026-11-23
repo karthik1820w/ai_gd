@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { SpeechAssembler, type CaptureLine, type RecognitionPiece } from "../src/lib/speechCapture.ts";
+import { createCaptureId, SpeechAssembler, type CaptureLine, type RecognitionPiece } from "../src/lib/speechCapture.ts";
 
 const r = (transcript: string, isFinal = true): RecognitionPiece => ({ transcript, isFinal });
 /** Run an event script, polling `due` every 100 ms like the browser does. Returns every line sent. */
@@ -24,6 +24,13 @@ function run(events: Array<{ at: number; results?: RecognitionPiece[]; newSessio
 }
 
 describe("speech assembler", () => {
+  it("creates capture IDs without requiring the secure-context randomUUID API", () => {
+    const first = createCaptureId(null);
+    const second = createCaptureId(null);
+    assert.match(first, /^capture-/);
+    assert.notEqual(first, second);
+    assert.equal(createCaptureId({ randomUUID: () => "test-id" }), "test-id");
+  });
   it("sends a finished phrase quickly, not after a long wait", () => {
     const { lines } = run([{ at: 1000, results: [r("regulation is needed")] }]);
     assert.equal(lines.length, 1);
