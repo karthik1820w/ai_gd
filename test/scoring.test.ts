@@ -110,6 +110,29 @@ describe("performance scores", () => {
     assert.equal(flagged.sttIssue, true);
   });
 
+  it("does not claim a technical issue happened before speech when chronology was not checked", () => {
+    const flagged = scoreParticipant({
+      contributions: [], speakingMs: 0, totalSpeakingMs: 0, participantCount: 2,
+      missed: { noResponse: 0, muted: 0, technical: 1, hostLocked: 0, disconnect: 0 },
+      mediaReady: true, speechAvailable: true, blockingTechnical: true,
+    });
+    assert.equal(flagged.incomplete, true);
+    assert.match(flagged.incompleteReason ?? "", /No scorable contribution was available/);
+    assert.doesNotMatch(flagged.incompleteReason ?? "", /before any contribution/i);
+  });
+
+  it("keeps captured contributions scorable even when a technical issue was also logged", () => {
+    const scored = scoreParticipant({
+      contributions: [{ wordCount: 10, relevance: "RELEVANT", communication: 75, knowledge: 70, reasoning: 65, respondsToOthers: false, positiveContribution: true }],
+      speakingMs: 8_000, totalSpeakingMs: 20_000, participantCount: 2,
+      missed: { noResponse: 0, muted: 0, technical: 1, hostLocked: 0, disconnect: 0 },
+      mediaReady: true, speechAvailable: true, blockingTechnical: true,
+    });
+    assert.equal(scored.incomplete, false);
+    assert.equal(scored.incompleteReason, null);
+    assert.equal(scored.sttIssue, true);
+  });
+
   it("does not penalise a muted invitation after enough contribution", () => {
     const contribution = {
       wordCount: 18,

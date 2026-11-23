@@ -313,8 +313,8 @@ export function scoreParticipant(input: ScoreInput): ScoreResult {
     if (heardNotTranscribed && input.speechAvailable) incompleteReason = `No words were transcribed, so content could not be scored (speech recognition returned no text).${heard}`;
     else if (!input.speechAvailable) incompleteReason = `This browser did not expose speech recognition, so spoken words were not available to score.${heard}`;
     else if (!input.mediaReady) incompleteReason = `No working microphone was detected, so there is no speech evidence to score.${heard}`;
-    else if (input.missed.disconnect > 0) incompleteReason = `The connection dropped before a scorable contribution was captured.${heard}`;
-    else incompleteReason = `A technical problem was logged before any contribution was captured.${heard}`;
+    else if (input.missed.disconnect > 0) incompleteReason = `No scorable contribution was available for this report. A connection interruption was recorded.${heard}`;
+    else incompleteReason = `No scorable contribution was available for this report. A technical or speech-capture issue was recorded for this participant.${heard}`;
   }
 
   const explanations: Record<string, string> = {
