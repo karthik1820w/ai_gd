@@ -11,6 +11,15 @@ import { moderationText } from "@/server/moderationText";
 
 export const dynamic = "force-dynamic";
 
+function parseEvidenceIds(value: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 export default async function ParticipantReport({ params }: { params: Promise<{ id: string }> }) {
   const user = await readSession();
   if (!user) redirect("/login");
@@ -49,10 +58,11 @@ export default async function ParticipantReport({ params }: { params: Promise<{ 
           <p className="muted">{evaluation.source === "gemini" ? `Evaluated by Gemini${evaluation.model ? ` (${evaluation.model})` : ""}` : "Evaluated with the heuristic fallback."}</p>
           <p className="muted">Weights: {evaluation.parameters.map((parameter) => `${parameter.label} ${Math.round(parameter.weight * 100)}%`).join(" · ")}</p>
           {evaluation.incompleteReason && <p>{evaluation.incompleteReason}</p>}
+          {evaluation.sttIssue && <p role="status">Score may be incomplete because speech capture had a technical issue.</p>}
           {evaluation.adjustedScore != null && <p>Original score {evaluation.overallScore ?? "—"}. Host note: {evaluation.adjustmentReason}</p>}
-          <ScoreChart rows={evaluation.parameters.map((parameter) => ({ name: parameter.label, score: parameter.score ?? 0 }))} />
+          <ScoreChart rows={evaluation.parameters.flatMap((parameter) => parameter.score == null ? [] : [{ name: parameter.label, score: parameter.score }])} />
           {evaluation.parameters.map((parameter) => (
-            <p key={parameter.id}><strong>{parameter.label}</strong> ({Math.round(parameter.weight * 100)}%): {parameter.score == null ? "Not scored" : parameter.score.toFixed(0)}<br /><span className="muted">{parameter.explanation}</span></p>
+            <p key={parameter.id}><strong>{parameter.label}</strong> ({Math.round(parameter.weight * 100)}%): {parameter.score == null ? "Not enough data" : parameter.score.toFixed(0)} · Confidence: {parameter.confidence == null ? "not available" : `${Math.round(parameter.confidence * 100)}%`} · Evidence: {parameter.evidenceIds ? parseEvidenceIds(parameter.evidenceIds).join(", ") || "none" : "not recorded"}<br /><span className="muted">{parameter.explanation}</span></p>
           ))}
           {mine && <>
             <h2 className="serif">Your transcript</h2>

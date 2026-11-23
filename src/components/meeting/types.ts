@@ -41,10 +41,11 @@ export type Segment = {
   name: string;
   text: string;
   startedAt: string;
+  endedAt?: string;
   relevance: string;
   relevanceReason: string;
   analysisSource: string;
-  accuracy?: string;
+  accuracy?: string | null;
   correction?: string;
   concepts?: string[];
   gist?: string;
@@ -74,7 +75,7 @@ export type RosterEntry = {
   technical?: number;
 };
 
-export type LiveScore = { participantId: string; userId: string; name: string; knowledge: number; participation: number; thinking: number; overall: number; source: string };
+export type LiveScore = { participantId: string; userId: string; name: string; knowledge: number | null; participation: number; thinking: number | null; overall: number | null; source: string; sttIssue: boolean };
 export type MediaHealth = { ready: boolean; error: string | null };
 export type Floor = { serverNow: number; lastSpeechAt: number; inviteAfterMs: number; moderated: boolean; invite: { userId: string; until: number } | null };
 export type Invite = { userId: string; name: string; until: number };
@@ -114,9 +115,11 @@ export type ResultsPerson = {
   category: string;
   incomplete: boolean;
   incompleteReason: string | null;
+  sttIssue: boolean;
+  status: "scored" | "incomplete" | "insufficient_data";
   speakingMs: number;
   contributions: number;
-  parameters: Array<{ key: string; label: string; weight: number; score: number | null; explanation: string }>;
+  parameters: Array<{ key: string; label: string; weight: number; score: number | null; evidenceIds: string[]; confidence: number | null; explanation: string }>;
   moderation: Array<{ kind: string; text: string; at: string }>;
   removed: { reason: string; at: string | null } | null;
   strengths: string[];

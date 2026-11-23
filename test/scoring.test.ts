@@ -45,7 +45,7 @@ describe("performance scores", () => {
     assert.ok(Math.abs(total - 1) < 1e-9);
   });
 
-  it("gives a low participation score when someone never speaks", () => {
+  it("gives a silent participant exactly the join baseline", () => {
     const silent = scoreParticipant({
       contributions: [],
       speakingMs: 0,
@@ -57,8 +57,8 @@ describe("performance scores", () => {
       blockingTechnical: false,
     });
     assert.equal(silent.incomplete, false);
-    assert.ok(silent.participation < 25);
-    assert.equal(silent.topicRelevance, 0);
+    assert.equal(silent.participation, 5);
+    assert.equal(silent.topicRelevance, null);
     assert.equal("accent" in silent, false);
   });
 
@@ -75,7 +75,39 @@ describe("performance scores", () => {
     });
     assert.equal(blocked.incomplete, true);
     assert.equal(blocked.overall, null);
+    assert.equal(blocked.participation, 5);
+    assert.equal(blocked.sttIssue, true);
     assert.match(blocked.incompleteReason ?? "", /speech recognition/i);
+  });
+
+  it("scores only measured participation and caps a monopolizing monologue", () => {
+    const flags = { mediaReady: true, speechAvailable: true, blockingTechnical: false };
+    const missed = { noResponse: 0, muted: 0, technical: 0, hostLocked: 0, disconnect: 0 };
+    const short = scoreParticipant({
+      contributions: [{ wordCount: 3, relevance: "RELEVANT", communication: 70, knowledge: 65, reasoning: 60, respondsToOthers: false, positiveContribution: true }],
+      speakingMs: 6_000, totalSpeakingMs: 24_000, participantCount: 4, missed, ...flags,
+    });
+    const balanced = scoreParticipant({
+      contributions: Array.from({ length: 4 }, () => ({ wordCount: 20, relevance: "RELEVANT" as const, communication: 80, knowledge: 80, reasoning: 75, respondsToOthers: true, positiveContribution: true })),
+      speakingMs: 200_000, totalSpeakingMs: 800_000, participantCount: 4, missed, ...flags,
+    });
+    const monologue = scoreParticipant({
+      contributions: Array.from({ length: 20 }, () => ({ wordCount: 20, relevance: "RELEVANT" as const, communication: 80, knowledge: 80, reasoning: 75, respondsToOthers: true, positiveContribution: true })),
+      speakingMs: 800_000, totalSpeakingMs: 1_000_000, participantCount: 4, missed, ...flags,
+    });
+    assert.ok(short.participation > 5);
+    assert.ok(short.participation < balanced.participation);
+    assert.ok(monologue.participation < 100);
+  });
+
+  it("does not change participation when only technical flags change", () => {
+    const base = { contributions: [], speakingMs: 0, totalSpeakingMs: 0, participantCount: 4, missed: { noResponse: 0, muted: 0, technical: 0, hostLocked: 0, disconnect: 0 }, mediaReady: true, speechAvailable: true, blockingTechnical: false };
+    const clean = scoreParticipant(base);
+    const flagged = scoreParticipant({ ...base, missed: { ...base.missed, technical: 1 }, mediaReady: false, speechAvailable: false, blockingTechnical: true });
+    assert.equal(clean.participation, 5);
+    assert.equal(flagged.participation, 5);
+    assert.equal(clean.sttIssue, false);
+    assert.equal(flagged.sttIssue, true);
   });
 
   it("does not penalise a muted invitation after enough contribution", () => {
@@ -121,19 +153,19 @@ describe("a person who spoke but was not transcribed", () => {
     const r = scoreParticipant({ ...base, speakingMs: 30_000 });
     assert.equal(r.incomplete, true);
     assert.equal(r.overall, null);
-    assert.ok(r.participation > 40 && r.participation <= 68, `participation ${r.participation}`);
+    assert.ok(r.participation > 5 && r.participation <= 30, `participation ${r.participation}`);
     assert.match(r.incompleteReason ?? "", /No words were transcribed/);
     assert.match(r.incompleteReason ?? "", /30 seconds/);
-    assert.match(r.explanations.participation, /Estimated from the 30 seconds/);
+    assert.match(r.explanations.participation, /30 seconds of measured speaking time/);
   });
   it("scores more speaking time higher, within the cap", () => {
     const a = scoreParticipant({ ...base, speakingMs: 8_000 }).participation;
     const b = scoreParticipant({ ...base, speakingMs: 60_000 }).participation;
-    assert.ok(b > a && b <= 68);
+    assert.ok(b > a && b <= 30);
   });
   it("leaves genuine silence alone", () => {
     const r = scoreParticipant({ ...base, speakingMs: 1_000 });
     assert.equal(r.incomplete, false);
-    assert.ok(r.participation < 25);
+    assert.equal(r.participation, 5);
   });
 });

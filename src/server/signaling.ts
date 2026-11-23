@@ -29,6 +29,7 @@ import { aiEnabled, complete, parseJson } from "@/server/ai";
 import { serverSttAvailable } from "@/server/transcribeAudio";
 import { aliasPeople, aliasText, deAlias, ANSWER_SCHEMA, taskPrompt } from "@/server/aiPrompts";
 import { readBrief } from "@/server/brief";
+import { logTranscriptDiagnostic, transcriptDiagnosticsEnabled } from "@/server/transcriptDiagnostics";
 
 declare module "socket.io" {
   interface SocketData {
@@ -112,6 +113,7 @@ export function attachSignaling(io: Server) {
         moderatorEnabled: access.discussion.moderatorEnabled,
         transcriptionEnabled: access.discussion.transcriptionEnabled,
         recordingEnabled: access.discussion.recordingEnabled,
+        transcriptDiagnostics: transcriptDiagnosticsEnabled(),
         ai: aiEnabled(),
         // Server-side speech to text (Gemini or offline Whisper): what the audio fallback needs.
         stt: serverSttAvailable(),
@@ -314,7 +316,27 @@ export function attachSignaling(io: Server) {
 
     // Every spoken line is answered: saved, or the reason it was not. The browser shows that reason, so a
     // missing transcript is never a mystery.
-    socket.on("transcript", async (payload: { text?: string; startedAt?: string; endedAt?: string }, ack?: (result: { ok: boolean; reason?: string; message?: string; benign?: boolean }) => void) => {
+    socket.on("transcript-diagnostic", (payload: { stage?: string; eventType?: string; segmentId?: string | null; captureId?: string | null; startedAt?: string | null; endedAt?: string | null; text?: string; confidence?: number | null; silence?: boolean | null; clientAt?: number }) => {
+      const discussionId = socket.data.discussionId;
+      if (!discussionId || !transcriptDiagnosticsEnabled()) return;
+      if (!["stt", "captured", "displayed"].includes(String(payload?.stage)) || !["partial", "final"].includes(String(payload?.eventType))) return;
+      const confidence = typeof payload.confidence === "number" && Number.isFinite(payload.confidence) ? Math.max(0, Math.min(1, payload.confidence)) : null;
+      logTranscriptDiagnostic(discussionId, {
+        stage: payload.stage as "stt" | "captured" | "displayed",
+        eventType: payload.eventType as "partial" | "final",
+        segmentId: typeof payload.segmentId === "string" ? payload.segmentId.slice(0, 160) : null,
+        captureId: typeof payload.captureId === "string" ? payload.captureId.slice(0, 160) : null,
+        speakerId: socket.data.user.id,
+        startedAt: typeof payload.startedAt === "string" ? payload.startedAt : null,
+        endedAt: typeof payload.endedAt === "string" ? payload.endedAt : null,
+        text: typeof payload.text === "string" ? payload.text.slice(0, 3000) : "",
+        confidence,
+        silence: typeof payload.silence === "boolean" ? payload.silence : null,
+        clientAt: typeof payload.clientAt === "number" ? payload.clientAt : undefined,
+      });
+    });
+
+    socket.on("transcript", async (payload: { text?: string; startedAt?: string; endedAt?: string; diagnosticId?: string }, ack?: (result: { ok: boolean; reason?: string; message?: string; benign?: boolean }) => void) => {
       const reply = typeof ack === "function" ? ack : () => undefined;
       if (!take(realtimeBuckets.transcript)) {
         reply({ ok: false, reason: "rate", message: "Too many lines at once. Speak in shorter sentences.", benign: true });
@@ -324,7 +346,7 @@ export function attachSignaling(io: Server) {
       if (!payload?.text) { reply({ ok: false, reason: "empty", message: "Nothing to save.", benign: true }); return; }
       logEvent(socket.data.discussionId, "speech", { userId: socket.data.user.id, text: payload.text });
       try {
-        const result = await addSegmentResult({ discussionId: socket.data.discussionId, userId: socket.data.user.id, text: payload.text, startedAt: payload.startedAt, endedAt: payload.endedAt });
+        const result = await addSegmentResult({ discussionId: socket.data.discussionId, userId: socket.data.user.id, text: payload.text, startedAt: payload.startedAt, endedAt: payload.endedAt, diagnosticId: payload.diagnosticId });
         reply(result.ok ? { ok: true } : { ok: false, reason: result.reason, message: result.message, benign: result.benign });
       } catch (error) {
         console.error("Could not save a transcript line.", error);

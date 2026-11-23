@@ -7,6 +7,7 @@ import { noteSpeech } from "@/server/activity";
 import { emitUser } from "@/server/realtime";
 import { aiWeights, scoreAIPillars } from "@/server/aiScoring";
 import { computeRubric, parseRubricWeights } from "@/server/rubric";
+import { logTranscriptDiagnostic } from "@/server/transcriptDiagnostics";
 import { classifyStatement, scoreParticipant, type Classification, type PriorLine, type RelevanceLabel, wordCount } from "@/server/scoring";
 
 const pendingByDiscussion = new Map<string, Set<Promise<void>>>();
@@ -60,9 +61,9 @@ export type SegmentDTO = {
   newPerspective: boolean;
   repeatsPrior: boolean;
   hasEvidence: boolean;
-  respondsToOthers: boolean;
+  respondsToOthers: boolean | null;
   positiveContribution: boolean;
-  accuracy: string;
+  accuracy: string | null;
   correction: string;
   understandingScore: number | null;
   originalityScore: number | null;
@@ -82,9 +83,9 @@ export function segmentDTO(segment: {
   newPerspective: boolean;
   repeatsPrior: boolean;
   hasEvidence: boolean;
-  respondsToOthers: boolean;
+  respondsToOthers: boolean | null;
   positiveContribution: boolean;
-  accuracy: string;
+  accuracy: string | null;
   correction: string;
   understandingScore: number | null;
   originalityScore: number | null;
@@ -141,7 +142,7 @@ async function modelClassification(input: {
 }): Promise<{
   classification: Classification;
   source: "gemini" | "heuristic";
-  accuracy: string;
+  accuracy: string | null;
   correction: string;
   understanding: number | null;
   originality: number | null;
@@ -151,7 +152,7 @@ async function modelClassification(input: {
   const heuristic = {
     classification: input.lexical,
     source: "heuristic" as const,
-    accuracy: "unverifiable",
+    accuracy: null,
     correction: "",
     understanding: null,
     originality: null,
@@ -165,31 +166,22 @@ async function modelClassification(input: {
     .join("\n");
   try {
     const raw = await complete(
-      taskPrompt("UTTERANCE", "Analyze only this spoken contribution against the topic and compact briefing. Return JSON matching the provided schema. Accuracy must be accurate, partly_accurate, inaccurate, opinion, off_topic, or unverifiable. Only give a correction when clearly and confidently inaccurate, in at most 25 words. Understanding, reasoning, and originality are integers 1-5. Do not reward length, confidence, jargon, or flattery. Ignore likely speech-recognition errors. Keep the feedback descriptive, not punitive."),
+      taskPrompt("UTTERANCE", "Classify only this spoken contribution against the topic and compact briefing. Return JSON matching the provided schema. Do not return numeric scores or ratings. Accuracy may be accurate, partly_accurate, inaccurate, opinion, off_topic, or unverifiable; use null if it cannot be determined. Relevance and the understanding, reasoning, and originality fields are category labels, not numbers. Only give a correction when clearly and confidently inaccurate, in at most 25 words. Do not reward length, confidence, jargon, or flattery. Ignore likely speech-recognition errors. Keep the feedback descriptive, not punitive."),
       `Topic: ${aliasText(input.topic, input.aliases)}\nDescription: ${aliasText(input.description, input.aliases)}\n<context>${aliasText(input.context, input.aliases)}</context>\n<briefing>${aliasText(input.brief, input.aliases)}</briefing>\nRules: ${aliasText(input.rules, input.aliases)}\n<recent_transcript>\n${context || "(none)"}\n</recent_transcript>\n<utterance speaker="${input.aliases.byId.get(input.speakerId) ?? "speaker"}">${aliasText(input.text, input.aliases)}</utterance>`,
       { tier: "flash", responseSchema: UTTERANCE_SCHEMA, roomId: input.discussionId },
     );
     if (!raw) return heuristic;
     const parsed = parseJson(raw);
-    const rawRelevance = Number(parsed.relevance);
-    const relevanceScore = Number.isFinite(rawRelevance) ? Math.max(0, Math.min(1, rawRelevance)) : Number.NaN;
-    const relevance = Number.isFinite(relevanceScore)
-      ? relevanceScore >= 0.82 ? "HIGHLY_RELEVANT" : relevanceScore >= 0.58 ? "RELEVANT" : relevanceScore >= 0.3 ? "PARTIALLY_RELEVANT" : "IRRELEVANT"
-      : input.lexical.relevance;
-    const five = (value: unknown) => {
-      const number = Number(value);
-      return Number.isFinite(number) ? Math.max(1, Math.min(5, Math.round(number))) : null;
-    };
-    const num = (value: unknown, fallback: number) => {
-      const n = Number(value);
-      return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : fallback;
-    };
-    const understanding = five(parsed.understanding);
-    const reasoning = five(parsed.reasoning);
-    const originality = five(parsed.originality);
+    const relevanceLabels = ["HIGHLY_RELEVANT", "RELEVANT", "PARTIALLY_RELEVANT", "IRRELEVANT"];
+    const relevance = relevanceLabels.includes(String(parsed.relevance)) ? String(parsed.relevance) as Classification["relevance"] : "PENDING";
+    const categoryPoints: Record<string, number> = { VERY_LOW: 20, LOW: 40, MODERATE: 60, HIGH: 80, VERY_HIGH: 100 };
+    const categoryScore = (value: unknown) => typeof value === "string" ? categoryPoints[value] ?? null : null;
+    const understanding = categoryScore(parsed.understanding);
+    const reasoning = categoryScore(parsed.reasoning);
+    const originality = categoryScore(parsed.originality);
     const accuracy = ["accurate", "partly_accurate", "inaccurate", "opinion", "off_topic", "unverifiable"].includes(String(parsed.accuracy))
       ? String(parsed.accuracy)
-      : "unverifiable";
+      : null;
     const correction = accuracy === "inaccurate" && typeof parsed.correction === "string"
       ? parsed.correction.trim().split(/\s+/).slice(0, 25).join(" ").slice(0, 400)
       : "";
@@ -206,16 +198,16 @@ async function modelClassification(input: {
       gist: typeof parsed.gist === "string" ? parsed.gist.trim().split(/\s+/).slice(0, 10).join(" ").slice(0, 300) : "",
       classification: {
         relevance,
-        reason: `Gemini rated this ${accuracy.replaceAll("_", " ")} with ${Math.round(num(relevanceScore, 0) * 100)}% topic relevance.`,
+        reason: `Gemini classified this contribution as ${relevance.toLowerCase().replaceAll("_", " ")}${accuracy ? ` and ${accuracy.replaceAll("_", " ")}` : "; accuracy is not available"}.`,
         newPerspective: originality !== null ? originality >= 4 : input.lexical.newPerspective,
         repeatsPrior: input.lexical.repeatsPrior,
         logicalArgument: reasoning !== null ? reasoning >= 3 : input.lexical.logicalArgument,
         hasEvidence: input.lexical.hasEvidence,
-        respondsToOthers: parsed.responds_to_others === true,
+        respondsToOthers: typeof parsed.responds_to_others === "boolean" ? parsed.responds_to_others : null,
         positiveContribution: accuracy !== "off_topic" && accuracy !== "inaccurate" && input.lexical.positiveContribution,
         communication: input.lexical.communication,
-        knowledge: understanding === null ? input.lexical.knowledge : num(understanding / 5 * 100, input.lexical.knowledge),
-        reasoning: reasoning === null ? input.lexical.reasoning : num(reasoning / 5 * 100, input.lexical.reasoning),
+        knowledge: understanding,
+        reasoning,
         conceptHits: input.lexical.conceptHits,
       },
     };
@@ -247,7 +239,7 @@ export type SegmentResult =
  * "no transcript" and nobody knows. Timing comes from the server clock (the person's own clock can be
  * wrong); only the line's length, which is clock-independent, is taken from the browser.
  */
-export async function addSegmentResult(input: { discussionId: string; userId: string; text: string; startedAt?: string; endedAt?: string; source?: "live" | "recording" }): Promise<SegmentResult> {
+export async function addSegmentResult(input: { discussionId: string; userId: string; text: string; startedAt?: string; endedAt?: string; source?: "live" | "recording"; diagnosticId?: string }): Promise<SegmentResult> {
   const reject = (reason: SegmentRejection): SegmentResult => ({ ok: false, reason, ...REJECTIONS[reason] });
   const text = input.text.replace(/\s+/g, " ").trim();
   const words = wordCount(text);
@@ -277,7 +269,10 @@ export async function addSegmentResult(input: { discussionId: string; userId: st
   if (participant.userId === discussion.hostId) return reject("host");
   if (!participant.transcriptionConsent) return reject("no-consent");
   const duplicate = recent.find((segment) => segment.participantId === participant.id && segment.text.toLowerCase() === text.toLowerCase() && Date.now() - segment.createdAt.getTime() < 8000);
-  if (duplicate) return { ok: true, segment: segmentDTO(duplicate) };
+  if (duplicate) {
+    logTranscriptDiagnostic(discussion.id, { stage: "persisted", eventType: "final", segmentId: duplicate.id, captureId: input.diagnosticId ?? null, speakerId: input.userId, startedAt: duplicate.startedAt.toISOString(), endedAt: duplicate.endedAt.toISOString(), text: duplicate.text, confidence: null, silence: null, source: input.source ?? "live", duplicate: true });
+    return { ok: true, segment: segmentDTO(duplicate) };
+  }
 
   const previous: PriorLine[] = recent
     .slice()
@@ -331,6 +326,7 @@ export async function addSegmentResult(input: { discussionId: string; userId: st
     },
     include: { participant: true },
   });
+  logTranscriptDiagnostic(discussion.id, { stage: "persisted", eventType: "final", segmentId: created.id, captureId: input.diagnosticId ?? null, speakerId: input.userId, startedAt: created.startedAt.toISOString(), endedAt: created.endedAt.toISOString(), text: created.text, confidence: null, silence: null, source: input.source ?? "live" });
   noteSpeech(discussion.id, input.userId);
   emitSegment(discussion.hostId, input.userId, segmentDTO(created));
   void prisma.speakingStat.upsert({
@@ -386,10 +382,10 @@ async function finishAnalysis(segmentId: string, hostId: string, input: Paramete
       communicationScore: classification.communication,
       knowledgeScore: classification.knowledge,
       reasoningScore: classification.reasoning,
-      accuracy: source === "gemini" ? result.accuracy : "unverifiable",
+      accuracy: source === "gemini" ? result.accuracy : null,
       correction: result.correction,
-      understandingScore: result.understanding === null ? null : result.understanding * 20,
-      originalityScore: result.originality === null ? null : result.originality * 20,
+      understandingScore: result.understanding,
+      originalityScore: result.originality,
       concepts: JSON.stringify(result.concepts),
       gist: result.gist,
     },
@@ -443,11 +439,12 @@ export async function publishLiveScores(discussionId: string) {
     const speakingMs = participant.stat?.speakingMs ?? 0;
     const scored = scoreParticipant({
       contributions: own.map((segment) => ({
+        segmentId: segment.id,
         wordCount: segment.wordCount,
         relevance: segment.relevance as RelevanceLabel,
-        communication: segment.communicationScore ?? 50,
-        knowledge: segment.knowledgeScore ?? 50,
-        reasoning: segment.reasoningScore ?? 50,
+        communication: segment.communicationScore,
+        knowledge: segment.knowledgeScore,
+        reasoning: segment.reasoningScore,
         respondsToOthers: segment.respondsToOthers,
         positiveContribution: segment.positiveContribution,
       })),
@@ -467,9 +464,10 @@ export async function publishLiveScores(discussionId: string) {
     });
     const pillars = scoreAIPillars({
       contributions: own.map((segment) => ({
-        understanding: segment.understandingScore ?? segment.knowledgeScore,
+        segmentId: segment.id,
+        understanding: segment.knowledgeScore,
         reasoning: segment.reasoningScore,
-        originality: segment.originalityScore ?? (segment.newPerspective ? 70 : 50),
+        originality: segment.originalityScore,
         accuracy: segment.accuracy,
         relevance: segment.relevance,
         respondsToOthers: segment.respondsToOthers,
@@ -479,6 +477,9 @@ export async function publishLiveScores(discussionId: string) {
       aiAnalysed: own.some((segment) => segment.analysisSource === "gemini"),
     });
     const rubric = computeRubric({ scored, knowledge: pillars.knowledge, weights: rubricWeights });
+    const knowledgeEvidence = own.filter((segment) => segment.knowledgeScore != null).map((segment) => segment.id);
+    const thinkingEvidence = own.filter((segment) => segment.reasoningScore != null || segment.originalityScore != null || segment.respondsToOthers).map((segment) => segment.id);
+    const participationEvidence = own.map((segment) => segment.id);
     return {
       participantId: participant.id,
       userId: participant.userId,
@@ -487,7 +488,14 @@ export async function publishLiveScores(discussionId: string) {
       participation: pillars.participation,
       thinking: pillars.thinking,
       overall: rubric.overall ?? pillars.overall,
+      sttIssue: scored.sttIssue,
       source: own.some((segment) => segment.analysisSource === "gemini") ? "gemini" : "heuristic",
+      criteria: {
+        knowledge: { value: pillars.knowledge, evidenceIds: knowledgeEvidence, confidence: null },
+        participation: { value: pillars.participation, evidenceIds: participationEvidence, confidence: null },
+        thinking: { value: pillars.thinking, evidenceIds: thinkingEvidence, confidence: null },
+        overall: { value: rubric.overall ?? pillars.overall, evidenceIds: [...new Set([...knowledgeEvidence, ...participationEvidence, ...thinkingEvidence])], confidence: null },
+      },
     };
   });
   emitUser(discussion.hostId, "live-scores", { scores: rows });

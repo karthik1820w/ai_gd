@@ -18,7 +18,6 @@ const RELEVANCE_VALUES: Record<string, number> = {
   RELEVANT: 0.78,
   PARTIALLY_RELEVANT: 0.48,
   IRRELEVANT: 0.12,
-  PENDING: 0.5,
 };
 
 export function aiWeights(value = process.env.AI_WEIGHTS): { weights: AIWeights; source: "configured" | "default" } {
@@ -37,12 +36,11 @@ export function scoreAIPillars(input: {
     understanding?: number | null;
     reasoning?: number | null;
     originality?: number | null;
-    accuracy?: string;
+    accuracy?: string | null;
     relevance?: string;
-    respondsToOthers?: boolean;
+    respondsToOthers?: boolean | null;
   }>;
   participation: number;
-  examiner?: { knowledge?: number; thinking?: number };
   weights?: AIWeights;
   /**
    * False when no AI model analysed any line (heuristic scoring only). Then nothing was checked for accuracy,
@@ -53,43 +51,40 @@ export function scoreAIPillars(input: {
 }) {
   const contributions = input.contributions;
   const aiAnalysed = input.aiAnalysed ?? true;
-  const perPointKnowledge = contributions.length && !aiAnalysed
-    ? contributions.reduce((sum, point) => sum + clamp(point.understanding ?? 50), 0) / contributions.length
-    : contributions.length
-    ? contributions.reduce((sum, point) => {
-        const understanding = clamp(point.understanding ?? 50) / 100;
-        const accuracy = ACCURACY_FACTORS[point.accuracy || "unverifiable"] ?? ACCURACY_FACTORS.unverifiable;
-        const relevance = RELEVANCE_VALUES[point.relevance || "PENDING"] ?? RELEVANCE_VALUES.PENDING;
-        return sum + understanding * 100 * accuracy * (0.5 + 0.5 * relevance);
-      }, 0) / contributions.length
-    : 0;
-  const perPointThinking = contributions.length
-    ? contributions.reduce((sum, point) => {
-        const reasoning = clamp(point.reasoning ?? 50) / 100;
-        const originality = clamp(point.originality ?? 50) / 100;
-        return sum + 100 * (0.5 * reasoning + 0.25 * originality + 0.25 * (point.respondsToOthers ? 1 : 0.4));
-      }, 0) / contributions.length
-    : 0;
-  const knowledge = contributions.length
-    ? input.examiner?.knowledge == null
-      ? perPointKnowledge
-      : input.examiner.knowledge * 0.65 + perPointKnowledge * 0.35
-    : 0;
-  const thinking = contributions.length
-    ? input.examiner?.thinking == null
-      ? perPointThinking
-      : input.examiner.thinking * 0.65 + perPointThinking * 0.35
-    : 0;
+  const mean = (values: Array<number | null>) => {
+    const observed = values.filter((value): value is number => value != null && Number.isFinite(value));
+    return observed.length ? observed.reduce((sum, value) => sum + value, 0) / observed.length : null;
+  };
+  const perPointKnowledge = mean(contributions.map((point) => {
+    if (point.understanding == null) return null;
+    if (!aiAnalysed) return clamp(point.understanding);
+    const accuracy = point.accuracy ? ACCURACY_FACTORS[point.accuracy] : undefined;
+    const relevance = point.relevance ? RELEVANCE_VALUES[point.relevance] : undefined;
+    if (accuracy == null || relevance == null) return null;
+    return clamp(point.understanding) * accuracy * (0.5 + 0.5 * relevance);
+  }));
+  const perPointThinking = mean(contributions.map((point) => {
+    const components: Array<[number | null | undefined, number]> = [
+      [point.reasoning, 0.5], [point.originality, 0.25], [typeof point.respondsToOthers === "boolean" ? (point.respondsToOthers ? 100 : 40) : null, 0.25],
+    ];
+    const usable = components.filter((entry): entry is [number, number] => typeof entry[0] === "number" && Number.isFinite(entry[0]));
+    const weight = usable.reduce((sum, [, partWeight]) => sum + partWeight, 0);
+    return weight ? usable.reduce((sum, [value, partWeight]) => sum + clamp(value) * partWeight, 0) / weight : null;
+  }));
+  const knowledge = contributions.length ? perPointKnowledge : null;
+  const thinking = contributions.length ? perPointThinking : null;
   const weights = input.weights || aiWeights().weights;
   const participation = clamp(input.participation);
-  const overall = Math.round(knowledge * weights[0] + participation * weights[1] + thinking * weights[2]);
+  const values: Array<[number | null, number]> = [[knowledge, weights[0]], [participation, weights[1]], [thinking, weights[2]]];
+  const usedWeight = values.reduce((sum, [value, weight]) => sum + (value == null ? 0 : weight), 0);
+  const overall = usedWeight ? Math.round(values.reduce((sum, [value, weight]) => sum + (value == null ? 0 : value * weight), 0) / usedWeight) : null;
   return {
-    knowledge: Math.round(clamp(knowledge)),
+    knowledge: knowledge == null ? null : Math.round(clamp(knowledge)),
     participation: Math.round(participation),
-    thinking: Math.round(clamp(thinking)),
+    thinking: thinking == null ? null : Math.round(clamp(thinking)),
     overall,
     weights,
-    perPointKnowledge: Math.round(clamp(perPointKnowledge)),
-    perPointThinking: Math.round(clamp(perPointThinking)),
+    perPointKnowledge: perPointKnowledge == null ? null : Math.round(clamp(perPointKnowledge)),
+    perPointThinking: perPointThinking == null ? null : Math.round(clamp(perPointThinking)),
   };
 }

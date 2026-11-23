@@ -204,7 +204,7 @@ model TranscriptSegment {
   relevance             Relevance              @default(PENDING)
   relevanceReason       String                 @default("")
   analysisSource        String                 @default("pending")
-  accuracy              String                 @default("unverifiable")
+  accuracy              String?
   correction            String                 @default("")
   understandingScore    Float?
   originalityScore      Float?
@@ -214,7 +214,7 @@ model TranscriptSegment {
   repeatsPrior          Boolean                @default(false)
   logicalArgument       Boolean                @default(false)
   hasEvidence           Boolean                @default(false)
-  respondsToOthers      Boolean                @default(false)
+  respondsToOthers      Boolean?
   positiveContribution  Boolean                @default(false)
   communicationScore    Float?
   knowledgeScore        Float?
@@ -265,6 +265,7 @@ model Evaluation {
   averageRelevance      Float?
   incomplete            Boolean                @default(false)
   incompleteReason      String?
+  sttIssue              Boolean                @default(false)
   adjustedScore         Float?
   adjustmentReason      String?
   adjustedById          String?
@@ -293,6 +294,8 @@ model EvaluationParameter {
   label        String
   weight       Float
   score        Float?
+  evidenceIds  String     @default("[]")
+  confidence   Float?
   explanation  String
   evaluation   Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
 

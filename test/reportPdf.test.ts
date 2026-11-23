@@ -129,6 +129,10 @@ describe("report PDF", () => {
 
   it("keeps the arithmetic honest and sanitises unsupported characters", () => {
     assert.equal(criteriaMath(criteria).total, 65.4);
+    const partial = criteriaMath(criteria.map((item, index) => index === 0 ? { ...item, score: null } : item));
+    assert.ok(Math.abs(partial.rows.reduce((sum, item) => sum + (item.effectiveWeight ?? 0), 0) - 1) < 0.001);
+    assert.equal(partial.total, Math.round(partial.rows.reduce((sum, item) => sum + (item.points ?? 0), 0) * 10) / 10);
+    assert.equal(criteriaMath(criteria.map((item) => ({ ...item, score: null }))).total, null);
     assert.equal(pdfSafe("Hello “world” — नमस्ते"), "Hello “world” — ??????");
   });
 });

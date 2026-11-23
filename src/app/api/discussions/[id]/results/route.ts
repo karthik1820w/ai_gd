@@ -7,6 +7,15 @@ import { formulaText, groupSummaryView, personView } from "@/server/resultsView"
 import { moderationText } from "@/server/moderationText";
 import { evaluationError, isEvaluating } from "@/server/evaluate";
 
+function parseEvidenceIds(value: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Results for the finished-discussion screen.
  * Host: every person's score and transcript. Participant: only their own score and
@@ -49,9 +58,10 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
       category: evaluation.category,
       incomplete: evaluation.incomplete,
       incompleteReason: evaluation.incompleteReason,
+      sttIssue: evaluation.sttIssue,
       speakingMs: evaluation.speakingMs,
       contributionCount: evaluation.contributionCount,
-      parameters: evaluation.parameters.map((parameter) => ({ key: parameter.key, label: parameter.label, weight: parameter.weight, score: parameter.score, explanation: parameter.explanation })),
+      parameters: evaluation.parameters.map((parameter) => ({ key: parameter.key, label: parameter.label, weight: parameter.weight, score: parameter.score, evidenceIds: parseEvidenceIds(parameter.evidenceIds), confidence: parameter.confidence, explanation: parameter.explanation })),
       notes: evaluation.notes,
       moderation: person.moderation.map((event) => ({ kind: event.kind, at: event.createdAt.toISOString(), text: moderationText(event.kind, event.detail) })),
       removed: person.removed ? { reason: person.removedReason || "Disruptive behaviour", at: person.removedAt?.toISOString() ?? null } : null,

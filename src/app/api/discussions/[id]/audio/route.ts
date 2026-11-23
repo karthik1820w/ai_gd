@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/guard";
 import { wavInfo } from "@/lib/audioChunks";
 import { addSegmentResult } from "@/server/segments";
 import { serverSttAvailable, transcribeAudio } from "@/server/transcribeAudio";
+import { logTranscriptDiagnostic } from "@/server/transcriptDiagnostics";
 
 /**
  * Fallback transcription. When a participant's browser cannot transcribe speech itself, their browser
@@ -55,6 +56,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   if (!text) return json({ ok: true, empty: true });
 
   const now = Date.now();
+  logTranscriptDiagnostic(id, { stage: "stt", eventType: "final", segmentId: `audio-${now}`, speakerId: user.id, startedAt: new Date(now - info.seconds * 1000).toISOString(), endedAt: new Date(now).toISOString(), text, confidence: null, silence: false, source: "recording" });
   const result = await addSegmentResult({
     discussionId: id,
     userId: user.id,

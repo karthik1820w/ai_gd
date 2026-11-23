@@ -59,6 +59,8 @@ export type RubricParameter = {
   label: string;
   weight: number;
   score: number | null;
+  evidenceIds: string[];
+  confidence: number | null;
   explanation: string;
 };
 
@@ -66,6 +68,7 @@ export type RubricResult = {
   overall: number | null;
   category: string;
   incomplete: boolean;
+  status: "scored" | "incomplete" | "insufficient_data";
   parameters: RubricParameter[];
 };
 
@@ -109,11 +112,13 @@ export function computeRubric(input: {
 
   const parameters: RubricParameter[] = RUBRIC_KEYS
     .filter((key) => weights[key] > 0)
-    .map((key) => ({ key, label: RUBRIC_LABELS[key], weight: weights[key], score: scores[key] == null ? null : round1(scores[key]), explanation: explanations[key] }));
+    .map((key) => ({ key, label: RUBRIC_LABELS[key], weight: weights[key], score: scores[key] == null ? null : round1(scores[key]), evidenceIds: scored.evidence[key], confidence: scored.confidence[key], explanation: explanations[key] }));
 
-  const overall = incomplete
+  const usedWeight = RUBRIC_KEYS.reduce((sum, key) => sum + (scores[key] == null ? 0 : weights[key]), 0);
+  const overall = incomplete || usedWeight === 0
     ? null
-    : round1(RUBRIC_KEYS.reduce((sum, key) => sum + (scores[key] ?? 0) * weights[key], 0));
+    : round1(RUBRIC_KEYS.reduce((sum, key) => sum + (scores[key] == null ? 0 : scores[key]! * weights[key]), 0) / usedWeight);
 
-  return { overall, category: categoryFor(overall, incomplete), incomplete, parameters };
+  const status = incomplete ? "incomplete" : overall == null ? "insufficient_data" : "scored";
+  return { overall, category: status === "insufficient_data" ? "Insufficient data" : categoryFor(overall, incomplete), incomplete, status, parameters };
 }

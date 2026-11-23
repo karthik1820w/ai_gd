@@ -176,18 +176,22 @@ const minutes = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : `$
 
 /** Weighted points per criterion, and their sum: this is the arithmetic behind the overall score. */
 export function criteriaMath(criteria: ReportCriterion[]) {
-  const rows = criteria.map((criterion) => ({ ...criterion, points: criterion.score == null ? 0 : criterion.score * criterion.weight }));
-  const total = rows.reduce((sum, row) => sum + row.points, 0);
-  return { rows, total: Math.round(total * 10) / 10 };
+  const usableWeight = criteria.reduce((sum, criterion) => sum + (criterion.score == null ? 0 : criterion.weight), 0);
+  const rows = criteria.map((criterion) => {
+    const effectiveWeight = criterion.score == null || usableWeight === 0 ? null : criterion.weight / usableWeight;
+    return { ...criterion, effectiveWeight, points: criterion.score == null || effectiveWeight == null ? null : criterion.score * effectiveWeight };
+  });
+  const total = usableWeight === 0 ? null : rows.reduce((sum, row) => sum + (row.points ?? 0), 0);
+  return { rows, total: total == null ? null : Math.round(total * 10) / 10 };
 }
 
 // ---------- sections ----------
 function methodology(doc: Doc, data: ReportData) {
   h2(doc, "How the score is calculated");
-  para(doc, "Each criterion is scored from 0 to 100 from what the person actually said, using their own microphone transcript. The overall score is the weighted total: for every criterion, multiply its score by its weight, then add them up.");
+  para(doc, "Each criterion is scored from 0 to 100 only when there is usable evidence. The overall score renormalises the published weights across criteria with evidence. Missing scores remain blank and do not count as zero.");
   para(doc, `Scored by: ${data.evaluatedBy}. Appearance, accent, gender and personality are not inputs. People who joined late or were muted by the host are not penalised for the time they could not speak.`, { color: MUTED, size: 9 });
   const bands = GRADE_BANDS.map((band, index) => `${band.label} ${band.min}-${index === 0 ? 100 : GRADE_BANDS[index - 1].min - 1}`).join("  ·  ");
-  para(doc, `Grade bands: ${bands}. A report with no usable speech is marked Incomplete instead of being given a low score.`, { color: MUTED, size: 9 });
+  para(doc, `Grade bands: ${bands}. Reports with technical transcript failures are marked Incomplete; reports with no measured criteria are marked Not enough data.`, { color: MUTED, size: 9 });
 }
 
 function criteriaTable(doc: Doc, person: ReportPerson) {
@@ -209,9 +213,9 @@ function criteriaTable(doc: Doc, person: ReportPerson) {
     room(doc, needed);
     y = doc.y;
     doc.font("Helvetica-Bold").fontSize(10).fillColor(INK).text(pdfSafe(row.label), 48, y, { width: 245, lineBreak: false });
-    doc.font("Helvetica").text(pct(row.weight), 300, y, { width: 50, align: "right", lineBreak: false });
+    doc.font("Helvetica").text(row.effectiveWeight == null ? "—" : pct(row.effectiveWeight), 300, y, { width: 50, align: "right", lineBreak: false });
     doc.font("Helvetica-Bold").text(fmtScore(row.score), 355, y, { width: 50, align: "right", lineBreak: false });
-    doc.font("Helvetica").text(row.score == null ? "–" : row.points.toFixed(1), 410, y, { width: 50, align: "right", lineBreak: false });
+    doc.font("Helvetica").text(row.points == null ? "–" : row.points.toFixed(1), 410, y, { width: 50, align: "right", lineBreak: false });
     meter(doc, row.score, 48, y + 15, 245);
     doc.y = y + 26;
     if (explanation) {
@@ -223,7 +227,7 @@ function criteriaTable(doc: Doc, person: ReportPerson) {
   y = doc.y;
   doc.moveTo(48, y).lineTo(48 + W, y).strokeColor(LINE).lineWidth(1).stroke();
   doc.font("Helvetica-Bold").fontSize(10).fillColor(INK).text("Overall (sum of points)", 48, y + 6, { width: 245, lineBreak: false });
-  doc.text(person.incomplete ? "Incomplete" : total.toFixed(1), 410, y + 6, { width: 50, align: "right", lineBreak: false });
+  doc.text(person.incomplete ? "Incomplete" : total == null ? "Not enough data" : total.toFixed(1), 410, y + 6, { width: 89, align: "right", lineBreak: false });
   doc.y = y + 24;
   if (person.adjusted) para(doc, `The host set the final score to ${fmtScore(person.score)} (calculated score ${fmtScore(person.originalScore)}). Reason: ${person.adjustmentReason || "not given"}.`, { color: WARN, size: 9 });
 }
@@ -257,7 +261,7 @@ function personSection(doc: Doc, person: ReportPerson, options: { speakersInTran
 
   kv(doc, [
     ["Participation basis", `${person.contributions} ${person.contributions === 1 ? "turn" : "turns"}  ·  ${minutes(person.speakingMs)} speaking  ·  ${person.participationPercent}% of the group's speech${person.missedInvites ? `  ·  ${person.missedInvites} AI ${person.missedInvites === 1 ? "invitation" : "invitations"} not answered` : ""}`],
-    ["Scored by", person.source === "gemini" ? `Gemini${person.model ? ` (${person.model})` : ""}` : "Built-in heuristic scoring (no AI model was available)"],
+    ["Qualitative feedback", person.source === "gemini" ? `Gemini${person.model ? ` (${person.model})` : ""}` : "Built-in feedback (no AI model was available)"],
   ]);
 
   if (person.incompleteReason) para(doc, `Why this report is incomplete: ${person.incompleteReason}`, { color: WARN });

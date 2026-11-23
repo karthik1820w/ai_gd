@@ -20,18 +20,21 @@ function PersonCard({ person, mine }: { person: ResultsPerson; mine: boolean }) 
       <ScoreRing score={person.incomplete ? null : person.score} />
       <h3>{person.name}{mine ? " (you)" : ""}</h3>
       <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-        {shortTime(person.speakingMs)} · {person.contributions} {person.contributions === 1 ? "turn" : "turns"} · {person.category}
+        {shortTime(person.speakingMs)} · {person.contributions} {person.contributions === 1 ? "turn" : "turns"} · {person.status === "insufficient_data" ? "Not enough data" : person.category}
       </p>
       {person.removed && <p className="rt-chip bad" role="note" style={{ margin: 0, borderRadius: 12 }}>Removed by the host{person.removed.at ? ` at ${new Date(person.removed.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""}. Reason: {person.removed.reason}</p>}
       {person.moderation.filter((event) => event.kind !== "REMOVED").map((event) => <p key={`${event.kind}-${event.at}`} className="rt-note">{new Date(event.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · {event.text}</p>)}
       {person.incomplete && person.incompleteReason && <p className="rt-note">{person.incompleteReason}</p>}
+      {person.sttIssue && <p className="rt-note" role="status">Score may be incomplete because speech capture had a technical issue.</p>}
       <strong style={{ fontSize: 13 }}>How this score was worked out</strong>
       {person.parameters.map((parameter) => (
         <div className="rt-crit" key={parameter.key}>
           <span>{parameter.label} <span className="muted">({Math.round(parameter.weight * 100)}%)</span></span>
           <b>{parameter.score == null ? "–" : Math.round(parameter.score)}</b>
-          <div className="rt-meter"><span style={{ width: `${Math.max(0, Math.min(100, parameter.score ?? 0))}%` }} /></div>
+          <div className="rt-meter">{parameter.score != null && <span style={{ width: `${Math.max(0, Math.min(100, parameter.score))}%` }} />}</div>
+          {parameter.score == null && <span className="rt-note">Not enough data</span>}
           {parameter.explanation && <span className="rt-note" style={{ gridColumn: "1 / -1" }}>{parameter.explanation}</span>}
+          <span className="rt-note" style={{ gridColumn: "1 / -1" }}>Confidence: {parameter.confidence == null ? "not available" : `${Math.round(parameter.confidence * 100)}%`} · Evidence IDs: {parameter.evidenceIds.join(", ") || "none"}</span>
         </div>
       ))}
       {person.strengths.length > 0 && <div><strong style={{ fontSize: 13 }}>Strengths</strong><ul style={{ margin: "4px 0 0", paddingLeft: 18, fontSize: 13 }}>{person.strengths.map((item) => <li key={item}>{item}</li>)}</ul></div>}

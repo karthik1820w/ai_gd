@@ -50,7 +50,7 @@ Scores are out of 100 and come from six published criteria, computed from the ge
 | Logical reasoning | 10% |
 | Listening and constructive engagement | 10% |
 
-Set `RUBRIC_WEIGHTS` to change them (see Environment). Five numbers (`25,20,20,15,10`) drop the listening criterion and are normalised to 100. Knowledge and reasoning blend live per-contribution analysis with the final Gemini evaluation when available. Clarity is measured on whole speaking turns from the generated transcript, not on the short fragments speech recognition emits at each pause. Participation is calculated by application code from contributions, speech share, missed invitations, and technical status. The live room still shows the three-pillar view (`AI_WEIGHTS`); its overall figure uses the rubric.
+Set `RUBRIC_WEIGHTS` to change them (see Environment). Five numbers (`25,20,20,15,10`) drop the listening criterion and are normalised to 100. Numeric criteria are computed deterministically from captured evidence; Gemini provides qualitative feedback only. Clarity is measured on whole speaking turns from the generated transcript, not on the short fragments speech recognition emits at each pause. Participation is calculated from measured participation: joining gives a 5-point baseline; qualifying turns, speaking time, relevant contributions, and observed replies can add points. Technical problems do not award or deduct participation points. Missing criterion evidence is left unscored and the overall score is renormalised across measured criteria. The live room still shows the three-pillar view (`AI_WEIGHTS`); its overall figure uses the rubric.
 
 ## Transcript generator
 
@@ -68,8 +68,8 @@ What is deliberately not scored: appearance, facial expression, gender, accent, 
 
 Special cases:
 
-- No speech: knowledge and thinking are 0, with the deterministic note “No contributions were recorded.” Participation is still calculated by code.
-- Speech recognition unavailable, no media, or a disconnect with zero speech: the report is **Incomplete**. The overall score is empty. It is not a fake low content score.
+- No measured evidence for a criterion: that criterion is unscored. If no criteria have evidence, the overall report says **Not enough data**.
+- Speech recognition unavailable, media unavailable, or a technical/disconnect event: the report carries an explicit warning. Technical issues do not add participation points or create made-up content scores.
 - A muted microphone is not punished when the person already contributed enough (at least three contributions, or a speaking share close to a fair share).
 - A missed invite counts only when the person has fewer than three contributions.
 - Host mute and disconnects are recorded. They are not treated as a failed answer.
@@ -168,6 +168,24 @@ If a session was left live when the server stopped, open it and choose **End and
 | `npm run typecheck` | Typecheck app, server, scripts, Prisma, and tests |
 | `npm run build` | Production Next.js build |
 | `npm start` | Production process; requires `npm run build` first |
+
+## Transcript diagnostics
+
+The cause of transcript omissions, duplicates, timing errors, or speaker attribution issues has not been established. Keep the root cause marked **unknown** until real session data is reviewed. Diagnostics are off by default and are opt-in because they can include transcript text.
+
+Set `TRANSCRIPT_DIAGNOSTICS=1` in the server environment and restart the app. During an active session the server writes JSON Lines to `data/transcript-diagnostics/<meeting-id>.jsonl` (or under `DATA_DIR` if configured). Each record includes diagnostic stage, speaker and segment IDs, text, timing, and available confidence. Protect and delete these files as sensitive transcript data. Turn capture off by setting `TRANSCRIPT_DIAGNOSTICS=0` and restarting.
+
+After collecting a real session file, run:
+
+```bash
+node scripts/diagnostics/analyze-transcript.mjs data/transcript-diagnostics/<meeting-id>.jsonl
+```
+
+The analyzer reports duplicate-final candidates, overlapping ranges, out-of-order times, speaker changes for the same segment ID, text marked during silence, low-confidence text, and arrival/end deltas. Its confidence threshold (default `0.5`) is diagnostic only and does not filter or alter scoring. Arrival/end deltas also include processing, network delay, and possible client/server clock offset; they cannot establish clock drift by themselves.
+
+## Local validation environment
+
+Next.js requires Node.js 20.9 or newer, and the installed `tsx` runner requires Node.js 18 or newer. This Windows environment must also allow Node's `os.userInfo()` to read the current OS account. On the affected machine, that native call fails with `uv_os_get_passwd returned ENOMEM`; the underlying cause remains unknown. Check it with `node -e "console.log(require('node:os').userInfo().username)"`. The failure has been observed with valid `USERNAME` and `USERPROFILE` values; setting those variables alone did not fix it. Run `npm test` only after the Node OS lookup succeeds. Do not use an application or committed test-runner workaround to conceal this host failure.
 
 ## Environment
 

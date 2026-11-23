@@ -15,7 +15,7 @@ describe("upgraded semantic + lexical classification", () => {
 
     assert.notEqual(result.relevance, "IRRELEVANT");
     assert.ok(result.relevance === "HIGHLY_RELEVANT" || result.relevance === "RELEVANT");
-    assert.ok(result.knowledge > 40);
+    assert.ok(result.knowledge! > 40);
   });
 
   it("still rejects completely off-topic remarks with zero semantic relation", () => {

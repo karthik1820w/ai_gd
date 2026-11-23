@@ -1,4 +1,5 @@
 import { embed, cosine } from "./embed.ts";
+import { PARTICIPATION_CONFIG as PARTICIPATION } from "./participationConfig.ts";
 
 export const COOKIE = "quorum_token";
 export const FORMULA_VERSION = "3";
@@ -15,15 +16,14 @@ export const WEIGHTS = {
   listening: 0.1,
 } as const;
 
-export const RELEVANCE_POINTS = {
+export type RelevanceLabel = "HIGHLY_RELEVANT" | "RELEVANT" | "PARTIALLY_RELEVANT" | "IRRELEVANT" | "PENDING";
+
+export const RELEVANCE_POINTS: Record<Exclude<RelevanceLabel, "PENDING">, number> = {
   HIGHLY_RELEVANT: 100,
   RELEVANT: 78,
   PARTIALLY_RELEVANT: 48,
   IRRELEVANT: 12,
-  PENDING: 50,
 } as const;
-
-export type RelevanceLabel = keyof typeof RELEVANCE_POINTS;
 
 export function clamp(n: number, min = 0, max = 100) {
   return Math.min(max, Math.max(min, n));
@@ -129,11 +129,11 @@ export type Classification = {
   repeatsPrior: boolean;
   logicalArgument: boolean;
   hasEvidence: boolean;
-  respondsToOthers: boolean;
+  respondsToOthers: boolean | null;
   positiveContribution: boolean;
   communication: number;
-  knowledge: number;
-  reasoning: number;
+  knowledge: number | null;
+  reasoning: number | null;
   conceptHits: string[];
 };
 
@@ -225,11 +225,12 @@ export type ScoreInput = {
   contributions: Array<{
     wordCount: number;
     relevance: RelevanceLabel;
-    communication: number;
-    knowledge: number;
-    reasoning: number;
-    respondsToOthers: boolean;
+    communication: number | null;
+    knowledge: number | null;
+    reasoning: number | null;
+    respondsToOthers: boolean | null;
     positiveContribution: boolean;
+    segmentId?: string;
   }>;
   speakingMs: number;
   totalSpeakingMs: number;
@@ -249,21 +250,38 @@ export type ScoreResult = {
   communication: number | null;
   knowledge: number | null;
   participation: number;
+  sttIssue: boolean;
   reasoning: number | null;
   listening: number | null;
   participationPercent: number;
   averageRelevance: number | null;
+  evidence: Record<"topicRelevance" | "communication" | "knowledge" | "participation" | "reasoning" | "listening", string[]>;
+  confidence: Record<"topicRelevance" | "communication" | "knowledge" | "participation" | "reasoning" | "listening", number | null>;
   explanations: Record<string, string>;
 };
 
-function weightedAverage(items: ScoreInput["contributions"], pick: (item: ScoreInput["contributions"][number]) => number) {
-  const weight = items.reduce((sum, item) => sum + Math.max(item.wordCount, 1), 0);
-  if (!weight) return 0;
-  return items.reduce((sum, item) => sum + pick(item) * Math.max(item.wordCount, 1), 0) / weight;
+function weightedAverage(items: ScoreInput["contributions"], pick: (item: ScoreInput["contributions"][number]) => number | null) {
+  const usable = items.flatMap((item) => {
+    const score = pick(item);
+    return score == null ? [] : [{ score, weight: Math.max(item.wordCount, 1) }];
+  });
+  const weight = usable.reduce((sum, item) => sum + item.weight, 0);
+  if (!weight) return null;
+  return usable.reduce((sum, item) => sum + item.score * item.weight, 0) / weight;
 }
 
 export function scoreParticipant(input: ScoreInput): ScoreResult {
   const count = input.contributions.length;
+  const idsFor = (predicate: (item: ScoreInput["contributions"][number]) => boolean = () => true) => input.contributions.filter(predicate).flatMap((item) => item.segmentId ? [item.segmentId] : []);
+  const evidence = {
+    topicRelevance: idsFor((item) => item.relevance !== "PENDING"),
+    communication: idsFor((item) => item.communication != null),
+    knowledge: idsFor((item) => item.knowledge != null),
+    participation: idsFor(),
+    reasoning: idsFor((item) => item.reasoning != null),
+    listening: idsFor((item) => item.respondsToOthers != null),
+  };
+  const confidence = { topicRelevance: null, communication: null, knowledge: null, participation: null, reasoning: null, listening: null };
   const share = input.totalSpeakingMs > 0 ? input.speakingMs / input.totalSpeakingMs : 0;
   const participationPercent = Math.round(share * 1000) / 10;
   const fairShare = 1 / Math.max(input.participantCount, 1);
@@ -272,28 +290,26 @@ export function scoreParticipant(input: ScoreInput): ScoreResult {
   const heardNotTranscribed = count === 0 && input.speakingMs >= HEARD_SPEECH_MS;
   const heardSeconds = Math.round(input.speakingMs / 1000);
 
-  let participation = 10;
-  if (heardNotTranscribed) {
-    // Estimated from time spoken (voice activity), capped so it never beats a real, transcribed contribution.
-    participation = clamp(20 + Math.min(60, input.speakingMs / 1000) * 0.8, 0, 68);
-  } else if (count === 0) {
-    if (!input.speechAvailable || !input.mediaReady || input.blockingTechnical || input.missed.technical > 0) participation = 55;
-    else if (input.missed.disconnect > 0 && input.missed.noResponse === 0) participation = 48;
-    else if (input.missed.muted > 0) participation = 22;
-    else participation = 10;
-  } else {
-    const volume = clamp(count * 16 + Math.min(36, input.speakingMs / 1500));
-    participation = volume;
-    if (share > 0.7 && input.participantCount >= 3) participation -= 10;
-    if (input.missed.noResponse > 0 && count < 3) participation -= input.missed.noResponse * 8;
-    if (!contributedEnough && input.missed.muted > 0) participation -= input.missed.muted * 3;
+  const sttIssue = !input.speechAvailable || !input.mediaReady || input.blockingTechnical || input.missed.technical > 0 || input.missed.disconnect > 0;
+  const eligibleTurns = input.contributions.filter((item) => item.wordCount >= 3);
+  const substantiveTurns = input.contributions.filter((item) => item.positiveContribution && item.relevance !== "IRRELEVANT" && item.relevance !== "PENDING");
+  const responseTurns = input.contributions.filter((item) => item.respondsToOthers && item.positiveContribution);
+  // Joining is the only evidence-free score. Every point above 5 comes from captured speech turns or measured voice time.
+  const turnPoints = Math.min(PARTICIPATION.maxTurnPoints, eligibleTurns.length * PARTICIPATION.pointsPerTurn);
+  const timePoints = Math.min(PARTICIPATION.maxSpeakingPoints, Math.floor(input.speakingMs / PARTICIPATION.millisecondsPerSpeakingPoint));
+  const substancePoints = Math.min(PARTICIPATION.maxSubstantivePoints, substantiveTurns.length * PARTICIPATION.pointsPerSubstantiveTurn);
+  const interactionPoints = Math.min(PARTICIPATION.maxInteractionPoints, responseTurns.length * PARTICIPATION.pointsPerResponse);
+  let participation = PARTICIPATION.joinBaseline + turnPoints + timePoints + substancePoints + interactionPoints;
+  // Repeatedly speaking for most of a multi-person meeting cannot max the participation component.
+  if (share > PARTICIPATION.dominantShareThreshold && input.participantCount >= 3 && count > 0) {
+    participation = Math.min(participation - PARTICIPATION.dominantSharePenalty, PARTICIPATION.dominantShareMaximum);
   }
-  participation = clamp(participation);
+  participation = clamp(participation, PARTICIPATION.joinBaseline, 100);
 
   const incomplete = count === 0 && (heardNotTranscribed || !input.mediaReady || !input.speechAvailable || input.blockingTechnical || input.missed.technical > 0 || input.missed.disconnect > 0);
   let incompleteReason: string | null = null;
   if (incomplete) {
-    const heard = heardNotTranscribed ? ` The microphone was active for about ${heardSeconds} seconds, so participation is estimated from that.` : "";
+    const heard = heardNotTranscribed ? ` The microphone was active for about ${heardSeconds} seconds; only measured speaking time contributes to participation.` : "";
     if (heardNotTranscribed && input.speechAvailable) incompleteReason = `No words were transcribed, so content could not be scored (speech recognition returned no text).${heard}`;
     else if (!input.speechAvailable) incompleteReason = `This browser did not expose speech recognition, so spoken words were not available to score.${heard}`;
     else if (!input.mediaReady) incompleteReason = `No working microphone was detected, so there is no speech evidence to score.${heard}`;
@@ -305,10 +321,10 @@ export function scoreParticipant(input: ScoreInput): ScoreResult {
     participation: contributedEnough
       ? "Muted invitations were not penalised because this participant had already contributed a fair share."
       : heardNotTranscribed
-        ? `Estimated from the ${heardSeconds} seconds the microphone was active, because no transcript was captured.`
+        ? `Based on ${heardSeconds} seconds of measured speaking time; no transcript was captured.`
       : count === 0
         ? "No speech was attributed to this microphone."
-        : "Based on contribution count, share of speaking time, and missed invitations while the microphone was available.",
+        : "Based on measured contribution turns and speaking time while the microphone was available.",
   };
 
   if (incomplete) {
@@ -321,10 +337,13 @@ export function scoreParticipant(input: ScoreInput): ScoreResult {
       communication: null,
       knowledge: null,
       participation: Math.round(participation * 10) / 10,
+      sttIssue,
       reasoning: null,
       listening: null,
       participationPercent,
       averageRelevance: null,
+      evidence,
+      confidence,
       explanations: {
         ...explanations,
         topicRelevance: "Not scored. Speech evidence was missing because of a technical limit.",
@@ -337,45 +356,47 @@ export function scoreParticipant(input: ScoreInput): ScoreResult {
   }
 
   if (count === 0) {
-    const overall = Math.round(participation * WEIGHTS.participation * 10) / 10;
+    const overall = Math.round(participation * 10) / 10;
     return {
       incomplete: false,
       incompleteReason: null,
       overall,
       category: categoryFor(overall, false),
-      topicRelevance: 0,
-      communication: 0,
-      knowledge: 0,
+      topicRelevance: null,
+      communication: null,
+      knowledge: null,
       participation: Math.round(participation * 10) / 10,
-      reasoning: 0,
-      listening: 0,
+      sttIssue,
+      reasoning: null,
+      listening: null,
       participationPercent,
-      averageRelevance: 0,
+      averageRelevance: null,
+      evidence,
+      confidence,
       explanations: {
         ...explanations,
-        topicRelevance: "Scored 0 because no speech was attributed to this participant.",
-        communication: "Scored 0 because there is no transcript to judge clarity from.",
-        knowledge: "Scored 0 because no content was captured.",
-        reasoning: "Scored 0 because no argument was captured.",
-        listening: "Scored 0 because no response was captured.",
+        topicRelevance: "Not enough data. No transcript was captured.",
+        communication: "Not enough data. No transcript was captured.",
+        knowledge: "Not enough data. No content was captured.",
+        reasoning: "Not enough data. No argument was captured.",
+        listening: "Not enough data. No response was captured.",
       },
     };
   }
 
-  const topicRelevance = weightedAverage(input.contributions, (item) => RELEVANCE_POINTS[item.relevance] ?? 50);
+  const topicRelevance = weightedAverage(input.contributions, (item) => item.relevance === "PENDING" ? null : RELEVANCE_POINTS[item.relevance]);
   const communication = weightedAverage(input.contributions, (item) => item.communication);
   const knowledge = weightedAverage(input.contributions, (item) => item.knowledge);
   const reasoning = weightedAverage(input.contributions, (item) => item.reasoning);
-  const responseRate = input.contributions.filter((item) => item.respondsToOthers && item.positiveContribution).length / count;
-  let listening = clamp(40 + responseRate * 60);
-  if (input.participantCount < 2) listening = 70;
-  const overall =
-    topicRelevance * WEIGHTS.topicRelevance +
-    communication * WEIGHTS.communication +
-    knowledge * WEIGHTS.knowledge +
-    participation * WEIGHTS.participation +
-    reasoning * WEIGHTS.reasoning +
-    listening * WEIGHTS.listening;
+  const listeningEvidence = input.contributions.filter((item) => item.respondsToOthers != null);
+  const responseRate = listeningEvidence.length ? listeningEvidence.filter((item) => item.respondsToOthers === true && item.positiveContribution).length / listeningEvidence.length : null;
+  let listening: number | null = responseRate != null && input.participantCount >= 2 ? clamp(40 + responseRate * 60) : null;
+  const values: Array<[number | null, number]> = [
+    [topicRelevance, WEIGHTS.topicRelevance], [communication, WEIGHTS.communication], [knowledge, WEIGHTS.knowledge],
+    [participation, WEIGHTS.participation], [reasoning, WEIGHTS.reasoning], [listening, WEIGHTS.listening],
+  ];
+  const usedWeight = values.reduce((sum, [value, weight]) => sum + (value == null ? 0 : weight), 0);
+  const overall = usedWeight > 0 ? values.reduce((sum, [value, weight]) => sum + (value == null ? 0 : value * weight), 0) / usedWeight : null;
 
   explanations.topicRelevance = `Word-weighted average of contribution relevance.`;
   explanations.communication = "Judged from transcript length, sentence shape, and filler sounds. Accent is not an input.";
@@ -386,16 +407,19 @@ export function scoreParticipant(input: ScoreInput): ScoreResult {
   return {
     incomplete: false,
     incompleteReason: null,
-    overall: Math.round(overall * 10) / 10,
+    overall: overall == null ? null : Math.round(overall * 10) / 10,
     category: categoryFor(overall, false),
-    topicRelevance: Math.round(topicRelevance * 10) / 10,
-    communication: Math.round(communication * 10) / 10,
-    knowledge: Math.round(knowledge * 10) / 10,
+    topicRelevance: topicRelevance == null ? null : Math.round(topicRelevance * 10) / 10,
+    communication: communication == null ? null : Math.round(communication * 10) / 10,
+    knowledge: knowledge == null ? null : Math.round(knowledge * 10) / 10,
     participation: Math.round(participation * 10) / 10,
-    reasoning: Math.round(reasoning * 10) / 10,
-    listening: Math.round(listening * 10) / 10,
+    sttIssue,
+    reasoning: reasoning == null ? null : Math.round(reasoning * 10) / 10,
+    listening: listening == null ? null : Math.round(listening * 10) / 10,
     participationPercent,
-    averageRelevance: Math.round(topicRelevance * 10) / 10,
+    averageRelevance: topicRelevance == null ? null : Math.round(topicRelevance * 10) / 10,
+    evidence,
+    confidence,
     explanations,
   };
 }

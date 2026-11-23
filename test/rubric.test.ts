@@ -62,7 +62,21 @@ describe("rubric score", () => {
     const silent = scoreParticipant({ ...base, contributions: [], speakingMs: 0 });
     const r = computeRubric({ scored: silent });
     assert.equal(r.incomplete, false);
-    assert.ok((r.overall ?? 99) < 5);
+    assert.equal(r.overall, 5);
+    assert.equal(r.status, "scored");
+  });
+  it("keeps null criteria missing and renormalizes only measured weights", () => {
+    const observed = scoreParticipant(base);
+    const partial = computeRubric({ scored: { ...observed, communication: null, knowledge: null, reasoning: null, topicRelevance: null, listening: null } });
+    assert.equal(partial.overall, observed.participation);
+    assert.equal(partial.parameters.find((item) => item.key === "communication")?.score, null);
+  });
+  it("returns insufficient_data when every criterion is null", () => {
+    const observed = scoreParticipant(base);
+    const allNull = { ...observed, topicRelevance: null, communication: null, knowledge: null, participation: null, reasoning: null, listening: null } as unknown as typeof observed;
+    const result = computeRubric({ scored: allNull });
+    assert.equal(result.overall, null);
+    assert.equal(result.status, "insufficient_data");
   });
   it("blends examiner 65/35", () => {
     assert.equal(blendExaminer(80, 60), 73);

@@ -9,15 +9,13 @@ import { finalizeJournal } from "@/server/journal";
 import { closeLivekitRoom } from "@/server/livekit";
 import { notify } from "@/server/notify";
 import { emitDiscussion } from "@/server/realtime";
-import { blendExaminer, computeRubric, parseRubricWeights } from "@/server/rubric";
+import { computeRubric, parseRubricWeights } from "@/server/rubric";
 import { buildTranscript } from "@/server/transcript";
 import { transcribeRecordings } from "@/server/transcribeRecordings";
 import { moderationText } from "@/server/moderationText";
 import { FORMULA_VERSION, buildFeedback, classifyStatement, scoreParticipant, type PriorLine, type RelevanceLabel } from "@/server/scoring";
 
 type GeminiParticipantReview = {
-  knowledge: number;
-  thinking: number;
   strengths: string[];
   improvements: string[];
   conceptsCovered: string[];
@@ -34,7 +32,7 @@ type GeminiReview = {
     agreements: string[];
     disagreements: string[];
     missedTopics: string[];
-    quality: number;
+    quality: null;
     bestContribution: { name: string; why: string } | null;
   };
   aliases: Aliases;
@@ -60,11 +58,11 @@ async function geminiReview(discussion: {
   segments: Array<{
     text: string;
     relevance: string;
-    accuracy: string;
+    accuracy: string | null;
     understandingScore: number | null;
     reasoningScore: number | null;
     originalityScore: number | null;
-    respondsToOthers: boolean;
+    respondsToOthers: boolean | null;
     participant: { userId: string };
   }>;
   missed: Array<{ participantId: string }>;
@@ -95,7 +93,7 @@ async function geminiReview(discussion: {
   })();
   try {
     const raw = await complete(
-      taskPrompt("EVALUATION", "Evaluate each listed alias using only the supplied briefing, stats, and transcript. Return a JSON object matching the schema. For each alias return knowledge and thinking scores from 0 to 100, strengths, improvements, concepts_covered, concepts_missed, accuracy_notes, and feedback. Participation is calculated by code and must not be estimated. Anchors: 90+ exceptional, 75-89 strong, 60-74 adequate, 40-59 weak, below 40 poor. Cite only transcript-supported short quotes of at most 12 words. Do not invent contributions or feedback for silent participants; give them zero knowledge and thinking and empty lists. Provide group summary, key_insights, agreements, disagreements, missed_topics, quality, and best_contribution {alias,why}."),
+      taskPrompt("EVALUATION", "Evaluate each listed alias using only the supplied briefing, stats, and transcript. Return a JSON object matching the schema. Do not return numeric scores or ratings; scores are computed by deterministic application code. For each alias return transcript-grounded strengths, improvements, concepts_covered, concepts_missed, accuracy_notes, and feedback. Participation is calculated by code. Cite only transcript-supported short quotes of at most 12 words. Do not invent contributions or feedback for silent participants. Provide group summary, key_insights, agreements, disagreements, missed_topics, and best_contribution {alias,why}."),
       `Topic: ${aliasText(discussion.topic, aliases)}\nDescription: ${aliasText(discussion.description, aliases)}\n<context>${aliasText(discussion.context, aliases)}</context>\n<briefing>${aliasText(brief, aliases)}</briefing>\n<participant_stats>\n${stats}\n</participant_stats>\n<transcript>\n${transcript}\n</transcript>`,
       { tier: "final", responseSchema: EVALUATION_SCHEMA, roomId: discussion.id },
     );
@@ -109,8 +107,6 @@ async function geminiReview(discussion: {
       const alias = typeof person.alias === "string" ? person.alias : "";
       if (!aliases.byAlias.has(alias)) continue;
       result.set(alias, {
-        knowledge: clampScore(person.knowledge),
-        thinking: clampScore(person.thinking),
         strengths: boundedStrings(person.strengths, aliases),
         improvements: boundedStrings(person.improvements, aliases),
         conceptsCovered: boundedStrings(person.concepts_covered, aliases),
@@ -132,7 +128,7 @@ async function geminiReview(discussion: {
         agreements: boundedStrings(group.agreements, aliases),
         disagreements: boundedStrings(group.disagreements, aliases),
         missedTopics: boundedStrings(group.missed_topics, aliases),
-        quality: clampScore(group.quality),
+        quality: null,
         bestContribution: best && typeof best.alias === "string" && aliases.byAlias.has(best.alias)
           ? { name: deAlias(best.alias, aliases), why: typeof best.why === "string" ? deAlias(best.why.slice(0, 500), aliases) : "" }
           : null,
@@ -142,11 +138,6 @@ async function geminiReview(discussion: {
     console.error("Gemini final evaluation failed; using heuristic scoring.", error);
     return null;
   }
-}
-
-function clampScore(value: unknown) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.max(0, Math.min(100, Math.round(number))) : 0;
 }
 
 async function summarise(discussion: {
@@ -299,11 +290,12 @@ export async function evaluateDiscussion(discussionId: string) {
     }
     const scored = scoreParticipant({
       contributions: own.map((segment) => ({
+        segmentId: segment.id,
         wordCount: segment.wordCount,
         relevance: segment.relevance as RelevanceLabel,
-        communication: segment.communicationScore ?? 50,
-        knowledge: segment.knowledgeScore ?? 50,
-        reasoning: segment.reasoningScore ?? 50,
+        communication: segment.communicationScore,
+        knowledge: segment.knowledgeScore,
+        reasoning: segment.reasoningScore,
         respondsToOthers: segment.respondsToOthers,
         positiveContribution: segment.positiveContribution,
       })),
@@ -325,24 +317,24 @@ export async function evaluateDiscussion(discussionId: string) {
     const examiner = alias ? review?.participants.get(alias) : undefined;
     const pillars = scoreAIPillars({
       contributions: own.map((segment) => ({
-        understanding: segment.understandingScore ?? segment.knowledgeScore,
+        segmentId: segment.id,
+        understanding: segment.knowledgeScore,
         reasoning: segment.reasoningScore,
-        originality: segment.originalityScore ?? (segment.newPerspective ? 70 : 50),
+        originality: segment.originalityScore,
         accuracy: segment.accuracy,
         relevance: segment.relevance,
         respondsToOthers: segment.respondsToOthers,
       })),
       participation: scored.participation,
-      examiner,
       weights: configuredWeights.weights,
-      aiAnalysed: Boolean(examiner) || own.some((segment) => segment.analysisSource === "gemini"),
+      aiAnalysed: own.some((segment) => segment.analysisSource === "gemini"),
     });
     const clarity = transcriptDoc.speakers.find((speaker) => speaker.speakerId === participant.id)?.clarity ?? null;
     const rubric = computeRubric({
       scored,
       communication: clarity,
       knowledge: pillars.knowledge,
-      reasoning: examiner ? blendExaminer(examiner.thinking, scored.reasoning ?? 0) : null,
+      reasoning: scored.reasoning,
       weights: rubricWeights,
     });
     const heuristicFeedback = buildFeedback({
@@ -389,6 +381,7 @@ export async function evaluateDiscussion(discussionId: string) {
         averageRelevance: scored.averageRelevance,
         incomplete: scored.incomplete,
         incompleteReason: scored.incompleteReason,
+        sttIssue: scored.sttIssue,
         adjustedScore: kept?.adjustedScore,
         adjustmentReason: kept?.adjustmentReason,
         adjustedById: kept?.adjustedById,
@@ -400,11 +393,13 @@ export async function evaluateDiscussion(discussionId: string) {
         source: examiner ? "gemini" : "heuristic",
         model: examiner ? aiModel("final") : null,
         parameters: {
-          create: parameters.map(({ key, label, weight, score, explanation }) => ({
+          create: parameters.map(({ key, label, weight, score, evidenceIds, confidence, explanation }) => ({
             key,
             label,
             weight,
             score,
+            evidenceIds: JSON.stringify(evidenceIds),
+            confidence,
             explanation,
           })),
         },

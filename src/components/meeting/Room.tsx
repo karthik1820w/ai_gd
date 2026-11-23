@@ -141,7 +141,8 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   const teardownRef = useRef<(background: boolean) => void>(() => undefined);
   const uploadRef = useRef<() => Promise<void>>(async () => undefined);
   const watchedRef = useRef(false);
-  const queueRef = useRef<Array<{ text: string; startedAt: string; endedAt: string }>>([]);
+  const queueRef = useRef<Array<{ text: string; startedAt: string; endedAt: string; diagnosticId?: string }>>([]);
+  const diagnosticsEnabledRef = useRef(false);
   const savedRef = useRef(0);
   const aiRef = useRef(false);
   // True when the server can turn audio into text (Gemini or offline Whisper): the audio fallback needs it.
@@ -172,11 +173,12 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       setCaptureIssue(result.message || "Your words could not be saved.");
     }
   };
-  function sendLine(line: { text: string; startedAt: string; endedAt: string }) {
+  function sendLine(line: { text: string; startedAt: string; endedAt: string; diagnosticId?: string }) {
     const socket = socketRef.current;
     if (!socket) return;
     // Before the room is joined the server would drop the line, so hold it until it can be saved.
     if (!watchedRef.current) { queueRef.current.push(line); return; }
+    if (diagnosticsEnabledRef.current) socket.emit("transcript-diagnostic", { stage: "captured", eventType: "final", segmentId: line.diagnosticId ?? null, captureId: line.diagnosticId ?? null, startedAt: line.startedAt, endedAt: line.endedAt, text: line.text, confidence: null, silence: false, clientAt: Date.now() });
     socket.emit("transcript", line, (result?: { ok: boolean; reason?: string; message?: string; benign?: boolean }) => {
       noteAckRef.current(result);
       // The server had not (re)joined this connection yet: keep the line and send it once it has.
@@ -316,16 +318,17 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
 
     socket.on("connect", () => { watchedRef.current = false; socket.emit("watch", { meetingId: discussion.meetingId, code }); });
     socket.on("room-error", (payload: { error: string }) => { if (payload.error !== "Slow down.") setFatal(payload.error); });
-    socket.on("session-state", (payload: { status: string; startedAt: string | null; ai?: boolean; stt?: boolean; brief?: TopicBrief | null; serverNow?: number }) => {
+    socket.on("session-state", (payload: { status: string; startedAt: string | null; ai?: boolean; stt?: boolean; transcriptDiagnostics?: boolean; brief?: TopicBrief | null; serverNow?: number }) => {
       setStatus(payload.status);
       setStartedAt(payload.startedAt);
       setAiOn(Boolean(payload.ai));
       aiRef.current = Boolean(payload.ai);
       sttRef.current = Boolean(payload.stt ?? payload.ai);
+      diagnosticsEnabledRef.current = Boolean(payload.transcriptDiagnostics);
       setBrief(payload.brief ?? null);
       // The room is joined: send any lines that were spoken before this moment.
       watchedRef.current = true;
-      for (const line of queueRef.current.splice(0)) socket.emit("transcript", line, noteAckRef.current);
+      for (const line of queueRef.current.splice(0)) sendLine(line);
       if (payload.status === "LIVE" || (isHost && payload.status === "SCHEDULED")) enterMedia();
     });
     socket.on("session-live", (payload: { startedAt: string | null }) => { setStatus("LIVE"); setStartedAt(payload.startedAt); enterMedia(); });
@@ -345,13 +348,16 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       if (!row.text) { const { [row.userId]: _gone, ...rest } = current; return rest; }
       return { ...current, [row.userId]: { name: row.name, text: row.text, at: Date.now() } };
     }));
-    socket.on("segment", (row: Segment) => setSegments((current) => {
-      const index = current.findIndex((item) => item.id === row.id);
-      if (index === -1) return [...current, row];
-      const next = [...current];
-      next[index] = row;
-      return next;
-    }));
+    socket.on("segment", (row: Segment) => {
+      if (diagnosticsEnabledRef.current) socket.emit("transcript-diagnostic", { stage: "displayed", eventType: "final", segmentId: row.id, startedAt: row.startedAt, endedAt: row.endedAt ?? null, text: row.text, confidence: null, silence: null, clientAt: Date.now() });
+      setSegments((current) => {
+        const index = current.findIndex((item) => item.id === row.id);
+        if (index === -1) return [...current, row];
+        const next = [...current];
+        next[index] = row;
+        return next;
+      });
+    });
     socket.on("segment", (row: Segment) => setInterims((current) => {
       if (!current[row.userId]) return current;
       const { [row.userId]: _saved, ...rest } = current;
@@ -535,10 +541,11 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     let active = false;
     let restartTimer = 0;
     let lastCaptionAt = 0;
+    let recognitionSession = 0;
 
     const ship = (line: CaptureLine | null) => {
       if (!line || audioModeRef.current) return;
-      sendLine({ text: line.text, startedAt: new Date(line.startedAt).toISOString(), endedAt: new Date(line.endedAt).toISOString() });
+      sendLine({ text: line.text, startedAt: new Date(line.startedAt).toISOString(), endedAt: new Date(line.endedAt).toISOString(), diagnosticId: crypto.randomUUID() });
     };
     const showCaption = (text: string) => {
       const now = Date.now();
@@ -549,6 +556,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     const start = () => {
       if (stopped || active) return;
       active = true;
+      recognitionSession += 1;
       assembler.newSession();
       const next = new Recognition();
       recognition = next;
@@ -557,6 +565,23 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       next.lang = lang;
       next.onresult = (event) => {
         const pieces = Array.from({ length: event.results.length }, (_, index) => ({ transcript: event.results[index][0]?.transcript ?? "", isFinal: event.results[index].isFinal }));
+        if (diagnosticsEnabledRef.current && watchedRef.current) {
+          for (let index = 0; index < event.results.length; index += 1) {
+            const result = event.results[index];
+            const alternative = result[0];
+            socket.emit("transcript-diagnostic", {
+              stage: "stt",
+              eventType: result.isFinal ? "final" : "partial",
+              segmentId: `${recognitionSession}:${index}`,
+              startedAt: null,
+              endedAt: null,
+              text: alternative?.transcript ?? "",
+              confidence: typeof alternative?.confidence === "number" ? alternative.confidence : null,
+              silence: !speakingRef.current,
+              clientAt: Date.now(),
+            });
+          }
+        }
         const { caption } = assembler.push(pieces, Date.now());
         if (pieces.some((piece) => piece.isFinal && piece.transcript.trim())) { recogFailures.current = 0; setSpeechIssue(""); }
         showCaption(caption);
@@ -946,6 +971,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
                     <Bar label="Know" value={score?.knowledge} />
                     <Bar label="Part" value={score?.participation} />
                     <Bar label="Think" value={score?.thinking} />
+                    {score?.sttIssue && <p className="rt-note" role="status">Score may be incomplete because speech capture had a technical issue.</p>}
                   </div>
                 );
               })}
@@ -962,6 +988,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
               <Bar label="Know" value={myScore?.knowledge} />
               <Bar label="Part" value={myScore?.participation} />
               <Bar label="Think" value={myScore?.thinking} />
+              {myScore?.sttIssue && <p className="rt-note" role="status">Score may be incomplete because speech capture had a technical issue.</p>}
             </>
           )}
           {primer}

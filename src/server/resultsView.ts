@@ -46,9 +46,11 @@ export type PersonView = {
   category: string;
   incomplete: boolean;
   incompleteReason: string | null;
+  sttIssue: boolean;
+  status: "scored" | "incomplete" | "insufficient_data";
   speakingMs: number;
   contributions: number;
-  parameters: Array<{ key: string; label: string; weight: number; score: number | null; explanation: string }>;
+  parameters: Array<{ key: string; label: string; weight: number; score: number | null; evidenceIds: string[]; confidence: number | null; explanation: string }>;
   /** What the host did to this person (mute, camera off, removal). Empty when nothing. */
   moderation: Array<{ kind: string; text: string; at: string }>;
   removed: { reason: string; at: string | null } | null;
@@ -69,25 +71,30 @@ export function personView(input: {
   category: string;
   incomplete: boolean;
   incompleteReason: string | null;
+  sttIssue?: boolean;
   speakingMs: number;
   contributionCount: number;
-  parameters: Array<{ key: string; label: string; weight: number; score: number | null; explanation: string }>;
+  parameters: Array<{ key: string; label: string; weight: number; score: number | null; evidenceIds?: string[]; confidence?: number | null; explanation: string }>;
   notes: NoteRow[];
   moderation?: Array<{ kind: string; text: string; at: string }>;
   removed?: { reason: string; at: string | null } | null;
 }): PersonView {
   const notes = (kind: string) => input.notes.filter((note) => note.kind === kind).map((note) => note.body);
   const remarks = notes("REMARK");
+  const score = input.adjustedScore ?? input.overallScore;
+  const status = input.incomplete ? "incomplete" : score == null ? "insufficient_data" : "scored";
   return {
     participantId: input.participantId,
     name: input.name,
-    score: input.adjustedScore ?? input.overallScore,
+    score,
     category: input.category,
     incomplete: input.incomplete,
     incompleteReason: input.incompleteReason,
+    sttIssue: input.sttIssue ?? false,
+    status,
     speakingMs: input.speakingMs,
     contributions: input.contributionCount,
-    parameters: input.parameters,
+    parameters: input.parameters.map((parameter) => ({ ...parameter, evidenceIds: parameter.evidenceIds ?? [], confidence: parameter.confidence ?? null })),
     moderation: input.moderation ?? [],
     removed: input.removed ?? null,
     strengths: notes("STRENGTH"),
