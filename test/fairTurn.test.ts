@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { pickNextSpeaker, INVITE_PENALTY_MS, type ParticipantTurnState } from "../src/server/fairTurn.ts";
+import { pickNextSpeaker, pickRandomNextSpeaker, INVITE_PENALTY_MS, type ParticipantTurnState } from "../src/server/fairTurn.ts";
 
 describe("fair turn scheduler", () => {
   it("picks the participant with the least talk time", () => {
@@ -44,6 +44,17 @@ describe("fair turn scheduler", () => {
 
     const next = pickNextSpeaker(participants);
     assert.equal(next?.id, "2");
+  });
+
+  it("randomly favors participants with fewer turns and less speaking time", () => {
+    const participants: ParticipantTurnState[] = [
+      { id: "1", name: "Alice", talkMs: 120_000, turns: 5, invites: 0, lastSpokeAt: 5000, online: true },
+      { id: "2", name: "Bob", talkMs: 0, turns: 0, invites: 0, lastSpokeAt: 0, online: true },
+    ];
+    assert.equal(pickRandomNextSpeaker(participants, () => 0)?.id, "1");
+    assert.equal(pickRandomNextSpeaker(participants, () => 0.999)?.id, "2");
+    assert.equal(pickRandomNextSpeaker(participants, () => 0.2)?.id, "2");
+    assert.equal(pickRandomNextSpeaker([{ ...participants[1], online: false }]), null);
   });
 });
 

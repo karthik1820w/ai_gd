@@ -30,6 +30,8 @@ export type Room = {
   presence: Map<string, MediaState>;
   invites: Map<string, Invite>;
   lastPromptAt: number;
+  /** Timestamp of the open-floor announcement or latest invite in the current silence cycle. */
+  silenceOpenAt: number | null;
   situations: Set<string>;
   lastTick: Map<string, number>;
   started: boolean;
@@ -62,6 +64,7 @@ export function room(discussionId: string): Room {
       presence: new Map(),
       invites: new Map(),
       lastPromptAt: 0,
+      silenceOpenAt: null,
       situations: new Set(),
       lastTick: new Map(),
       started: false,
@@ -88,6 +91,7 @@ export function markLive(discussionId: string) {
   if (!current.started) {
     current.started = true;
     current.lastSpeechAt = Date.now();
+    current.silenceOpenAt = null;
   }
 }
 
@@ -120,6 +124,7 @@ export function speakStart(discussionId: string, userId: string): boolean {
   current.invites.delete(userId);
   current.hands = current.hands.filter((h) => h !== userId);
   current.lastSpeechAt = Date.now();
+  current.silenceOpenAt = null;
   current.lastSpokeAtMap.set(userId, Date.now());
   return true;
 }
@@ -233,6 +238,7 @@ export function checkFloorTimeout(discussionId: string, timeoutMs = 8000): strin
 export function noteSpeech(discussionId: string, userId: string) {
   const current = room(discussionId);
   current.lastSpeechAt = Date.now();
+  current.silenceOpenAt = null;
   current.lastSpokeAtMap.set(userId, Date.now());
   current.invites.delete(userId);
 }
@@ -292,6 +298,7 @@ export function acceptSpeakingTick(discussionId: string, userId: string) {
   if (now - previous < 700) return false;
   current.lastTick.set(userId, now);
   current.lastSpeechAt = now;
+  current.silenceOpenAt = null;
   current.lastSpokeAtMap.set(userId, now);
   return true;
 }

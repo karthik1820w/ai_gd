@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import { consumeHand, dropRoom, handQueue, otherSpeaker, room, setPresence, speakStart, speakStop, clearPresence } from "../src/server/activity.ts";
-import { AUTO_END_SPEAKER_GRACE_MS, FIRST_INVITE_AFTER_MS, HOST_AWAY_GRACE_MS, INVITE_AFTER_MS, nextHostWatch, secondsUntilInvite, shouldAutoEnd, type HostWatch } from "../src/lib/floor.ts";
+import { AUTO_END_SPEAKER_GRACE_MS, HOST_AWAY_GRACE_MS, INVITE_AFTER_MS, OPEN_FLOOR_RESPONSE_MS, nextHostWatch, nextSilenceAction, secondsUntilInvite, shouldAutoEnd, type HostWatch } from "../src/lib/floor.ts";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const media = (socketId: string, over: Partial<{ audio: boolean; hand: boolean }> = {}) => ({ socketId, audio: false, video: false, hand: false, screen: false, connected: true, ...over });
@@ -91,8 +91,16 @@ describe("floor timing", () => {
     assert.equal(secondsUntilInvite(1_000, 6_000), 0);
   });
 
+  it("announces to the room, waits five more seconds, then permits a targeted invite", () => {
+    const openAt = 10_000;
+    assert.equal(nextSilenceAction({ quietForMs: 4_999, openFloorAt: null, now: openAt, hasInvite: false }), null);
+    assert.equal(nextSilenceAction({ quietForMs: 5_000, openFloorAt: null, now: openAt, hasInvite: false }), "announce");
+    assert.equal(nextSilenceAction({ quietForMs: 9_999, openFloorAt: openAt, now: openAt + OPEN_FLOOR_RESPONSE_MS - 1, hasInvite: false }), null);
+    assert.equal(nextSilenceAction({ quietForMs: 10_000, openFloorAt: openAt, now: openAt + OPEN_FLOOR_RESPONSE_MS, hasInvite: false }), "invite");
+    assert.equal(nextSilenceAction({ quietForMs: 10_000, openFloorAt: openAt, now: openAt + 20_000, hasInvite: true }), null);
+  });
+
   it("keeps the other timings sensible", () => {
-    assert.ok(FIRST_INVITE_AFTER_MS >= INVITE_AFTER_MS);
     assert.ok(HOST_AWAY_GRACE_MS >= 5_000, "a network blink must not count as the host leaving");
     assert.ok(AUTO_END_SPEAKER_GRACE_MS <= 60_000, "a speaker may finish a sentence, not a speech");
   });

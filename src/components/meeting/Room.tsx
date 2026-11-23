@@ -6,7 +6,7 @@ import { io, type Socket } from "socket.io-client";
 import { Hand, Mic, MicOff, MonitorUp, PhoneOff, Video, VideoOff } from "lucide-react";
 import { createSpeakingDetector } from "@/lib/speakingDetector";
 import { FocusTracker, LAYOUTS, isLayoutMode, type LayoutMode } from "@/lib/stageLayout";
-import { FIRST_INVITE_AFTER_MS, SPEAKING_HEARTBEAT_MS, secondsUntilInvite } from "@/lib/floor";
+import { INVITE_AFTER_MS, SPEAKING_HEARTBEAT_MS, secondsUntilInvite } from "@/lib/floor";
 import { buildSeats, centerMessage, clockLabel, connectionText, qualityLabel, spacedCode, type LiveOverride } from "@/lib/meetingView";
 import { formatClock } from "@/lib/format";
 import { SpeechChunker, encodeWav } from "@/lib/audioChunks";
@@ -18,7 +18,7 @@ import { Results } from "./Results";
 import type { DiscussionInfo, Floor, Invite, LiveScore, MediaHealth, Peer, RosterEntry, Segment, TopicBrief } from "./types";
 
 type Toast = { id: string; text: string };
-type FloorState = { lastSpeechAt: number; inviteAfterMs: number; moderated: boolean; skew: number };
+type FloorState = { lastSpeechAt: number; inviteAfterMs: number; openFloorAt: number | null; moderated: boolean; skew: number };
 type HandEntry = { userId: string; name: string; raisedAt: number; position: number; speakingMs: number; contributions: number };
 type AiAnswer = { question?: string; answer: string; sources?: string[]; by?: string; shared?: boolean };
 type ReadingMode = "sage" | "paper" | "night";
@@ -349,6 +349,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       return { ...current, [row.userId]: { name: row.name, text: row.text, at: Date.now() } };
     }));
     socket.on("segment", (row: Segment) => {
+      setFloor((current) => current ? { ...current, lastSpeechAt: Date.now(), openFloorAt: null, skew: 0 } : current);
       if (diagnosticsEnabledRef.current) socket.emit("transcript-diagnostic", { stage: "displayed", eventType: "final", segmentId: row.id, startedAt: row.startedAt, endedAt: row.endedAt ?? null, text: row.text, confidence: null, silence: null, clientAt: Date.now() });
       setSegments((current) => {
         const index = current.findIndex((item) => item.id === row.id);
@@ -366,7 +367,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     socket.on("roster", (rows: RosterEntry[]) => { setRoster(rows); setOverrides({}); setLockOverrides({}); });
     socket.on("floor", (payload: Floor & { hostAway?: boolean }) => {
       setHostAway(Boolean(payload.hostAway));
-      setFloor({ lastSpeechAt: payload.lastSpeechAt, inviteAfterMs: payload.inviteAfterMs, moderated: payload.moderated, skew: payload.serverNow - Date.now() });
+      setFloor({ lastSpeechAt: payload.lastSpeechAt, inviteAfterMs: payload.inviteAfterMs, openFloorAt: payload.openFloorAt, moderated: payload.moderated, skew: payload.serverNow - Date.now() });
       setInvite(payload.invite ? { userId: payload.invite.userId, name: nameOf(payload.invite.userId), until: payload.invite.until } : null);
     });
     socket.on("speaking-turn", (payload: { userId: string; name: string; until: number }) => setInvite({ userId: payload.userId, name: payload.name, until: payload.until }));
@@ -381,9 +382,10 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       pendingVoiceRef.current = null;
       if (Date.now() - pending.at < 25_000 && voiceRef.current) sayAloud(pending.text);
     };
-    socket.on("moderator", (row: { message: string; targetUserId?: string | null }) => {
+    socket.on("moderator", (row: { message: string; situation?: string; targetUserId?: string | null }) => {
       pushToast(row.message);
-      if (!voiceRef.current || (row.targetUserId && row.targetUserId !== user.id)) return;
+      if (row.situation === "OPEN_FLOOR") setFloor((current) => current ? { ...current, openFloorAt: Date.now() } : current);
+      if (!voiceRef.current || (row.targetUserId && row.targetUserId !== user.id && row.situation !== "INVITE")) return;
       pendingVoiceRef.current = { text: row.message, at: Date.now() };
       flushVoice();
     });
@@ -411,6 +413,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     socket.on("speaking", (payload: { userId: string; speaking: boolean }) => {
       if (payload.speaking) {
         window.speechSynthesis?.cancel();
+        setFloor((current) => current ? { ...current, lastSpeechAt: Date.now(), openFloorAt: null, skew: 0 } : current);
       } else {
         window.setTimeout(flushVoice, 700);
       }
@@ -857,8 +860,9 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   let secondsToInvite: number | null = null;
   if (status === "LIVE" && floor?.moderated && !invite && speakingIds.size === 0) {
     const lastSpeech = Math.max(floor.lastSpeechAt - floor.skew, lastSpeechLocal);
-    const untilFirst = Math.ceil((FIRST_INVITE_AFTER_MS - elapsed) / 1000);
-    secondsToInvite = Math.max(secondsUntilInvite(lastSpeech, tick, floor.inviteAfterMs), untilFirst, 0);
+    const phaseStart = floor.openFloorAt == null ? lastSpeech : floor.openFloorAt - floor.skew;
+    const phaseDelay = floor.openFloorAt == null ? floor.inviteAfterMs : INVITE_AFTER_MS;
+    secondsToInvite = secondsUntilInvite(phaseStart, tick, phaseDelay);
   }
   const message = centerMessage({
     status, isHost, moderated: Boolean(floor?.moderated), invite, selfId: user.id,

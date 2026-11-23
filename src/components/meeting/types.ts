@@ -77,7 +77,7 @@ export type RosterEntry = {
 
 export type LiveScore = { participantId: string; userId: string; name: string; knowledge: number | null; participation: number; thinking: number | null; overall: number | null; source: string; sttIssue: boolean };
 export type MediaHealth = { ready: boolean; error: string | null };
-export type Floor = { serverNow: number; lastSpeechAt: number; inviteAfterMs: number; moderated: boolean; invite: { userId: string; until: number } | null };
+export type Floor = { serverNow: number; lastSpeechAt: number; inviteAfterMs: number; openFloorAt: number | null; moderated: boolean; invite: { userId: string; until: number } | null };
 export type Invite = { userId: string; name: string; until: number };
 
 /** A remote person's tracks as LiveKit currently reports them. */

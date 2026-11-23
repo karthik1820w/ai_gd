@@ -3,12 +3,13 @@ import { aiEnabled, complete, parseJson } from "@/server/ai";
 import { aliasPeople, aliasText, deAlias, MODERATOR_SCHEMA, taskPrompt, type AliasEntry } from "@/server/aiPrompts";
 import { checkFloorTimeout, handQueue, markLive, markVoiceStop, recordInvite, rememberPrompt, room, snapshot } from "@/server/activity";
 import { emitDiscussion, emitUser } from "@/server/realtime";
-import { FIRST_INVITE_AFTER_MS, FLOOR_STALE_MS, INVITE_AFTER_MS, nextHostWatch, PROMPT_COOLDOWN_MS, shouldAutoEnd } from "@/lib/floor";
+import { FLOOR_STALE_MS, INVITE_AFTER_MS, nextHostWatch, nextSilenceAction, PROMPT_COOLDOWN_MS, shouldAutoEnd } from "@/lib/floor";
 import { endDiscussion } from "@/server/evaluate";
-import { pickNextSpeaker } from "@/server/fairTurn";
+import { pickRandomNextSpeaker } from "@/server/fairTurn";
 import { logEvent } from "@/server/journal";
 
 const TEMPLATES = {
+  OPEN_FLOOR: () => "The floor is open. Anyone can add their points.",
   SILENCE: (topic: string) => [
     `The discussion has paused. Would anyone like to add a perspective on ${topic}?`,
     `We have a quiet moment. Can someone offer an example related to ${topic}?`,
@@ -144,7 +145,7 @@ export async function moderateLive() {
     const started = discussion.startedAt?.getTime() ?? now;
     const elapsed = now - started;
     const durationMs = discussion.durationMin * 60_000;
-    if (elapsed < 15_000) continue;
+    if (elapsed < INVITE_AFTER_MS) continue;
 
     const remaining = durationMs - elapsed;
     if (remaining < 90_000 && remaining > 0 && !live.situations.has("WRAP_UP")) {
@@ -173,11 +174,17 @@ export async function moderateLive() {
 
     const quietFor = now - live.lastSpeechAt;
 
-    // Fair-turn moderation. Once the floor has been open for INVITE_AFTER_MS the moderator invites someone.
-    // The hand queue is served first (first raised, first invited); with no hands up it invites the connected
-    // person who has taken part least. Only one invitation is open at a time; if it times out unanswered, the
-    // next person is asked, and so on until somebody responds.
-    if (elapsed > FIRST_INVITE_AFTER_MS && quietFor > INVITE_AFTER_MS && live.invites.size === 0) {
+    // After five seconds of silence, invite the whole room to contribute. If another five seconds pass
+    // without speech, call one participant using a participation-weighted lottery. Volunteered hands stay first.
+    const silenceAction = nextSilenceAction({ quietForMs: quietFor, openFloorAt: live.silenceOpenAt, now, hasInvite: live.invites.size > 0 });
+    if (quietFor < INVITE_AFTER_MS) live.silenceOpenAt = null;
+    if (silenceAction === "announce") {
+      live.silenceOpenAt = now;
+      await say(discussion.id, "OPEN_FLOOR", TEMPLATES.OPEN_FLOOR(), "template");
+      continue;
+    }
+
+    if (silenceAction === "invite") {
       const candidates = active
         // A person the host has muted cannot take the floor, so inviting them would only waste the turn.
         .filter((p) => p.userId !== discussion.hostId && !p.micLocked && live.presence?.get(p.userId)?.connected)
@@ -192,7 +199,7 @@ export async function moderateLive() {
         }));
 
       const queued = handQueue(discussion.id).map((entry) => candidates.find((candidate) => candidate.id === entry.userId)).find(Boolean);
-      const nextSpeaker = queued ?? pickNextSpeaker(candidates);
+      const nextSpeaker = queued ?? pickRandomNextSpeaker(candidates);
       if (nextSpeaker) {
         const candidateParticipant = active.find((p) => p.userId === nextSpeaker.id);
         if (candidateParticipant) {
@@ -200,20 +207,8 @@ export async function moderateLive() {
           const handRaised = Boolean(queued);
           const fallback = handRaised
             ? `${candidateParticipant.displayName}, you raised your hand. Please go ahead, you have about ${seconds} seconds.`
-            : `${candidateParticipant.displayName}, we have not heard your thoughts recently. You have about ${seconds} seconds if you would like to speak.`;
-          const people = active.map((person) => ({ id: person.userId, name: person.displayName }));
-          const recentLines = discussion.segments.slice().reverse().map((segment) => ({ userId: segment.participant.userId, text: segment.text }));
-          const briefing = (() => {
-            try {
-              const parsed = discussion.aiBrief ? JSON.parse(discussion.aiBrief) as Record<string, unknown> : {};
-              return parsed.status === "ready" ? JSON.stringify({ summary: parsed.summary, key_concepts: parsed.key_concepts, rubric: parsed.rubric }).slice(0, 2000) : "";
-            } catch {
-              return "";
-            }
-          })();
-          const spoken = handRaised
-            ? { text: fallback, source: "template" }
-            : await promptText("INVITE", fallback, candidateParticipant.displayName, discussion.id, people, recentLines, briefing);
+            : `${candidateParticipant.displayName}, we would like to hear your facts about ${discussion.topic}.`;
+          const spoken = { text: fallback, source: "template" };
           // Somebody may have started speaking while the question was being written: never talk over them.
           if (live.speaking.size > 0) continue;
           live.invites.set(nextSpeaker.id, {
@@ -223,6 +218,7 @@ export async function moderateLive() {
             windowSec: seconds,
           });
           recordInvite(discussion.id, nextSpeaker.id);
+          live.silenceOpenAt = now;
           live.situations.add(`INVITE-${nextSpeaker.id}`);
           await say(discussion.id, "INVITE", spoken.text, spoken.source, nextSpeaker.id);
           emitDiscussion(discussion.id, "speaking-turn", {
@@ -236,12 +232,7 @@ export async function moderateLive() {
       }
     }
 
-    if (quietFor > discussion.silencePromptSec * 1000 && !live.situations.has("SILENCE-OPEN")) {
-      const choices = TEMPLATES.SILENCE(discussion.topic);
-      const spoken = await promptText("SILENCE", choices[Math.floor(Math.random() * choices.length)], undefined, discussion.id);
-      await say(discussion.id, "SILENCE", spoken.text, spoken.source);
-      live.situations.add("SILENCE-OPEN");
-    } else if (quietFor > discussion.silencePromptSec * 1000 && now - live.lastPromptAt > 75_000) {
+    if (quietFor > discussion.silencePromptSec * 1000 && now - live.lastPromptAt > 75_000) {
       const choices = TEMPLATES.SILENCE(discussion.topic);
       const spoken = await promptText("SILENCE", choices[Math.floor(Math.random() * choices.length)], undefined, discussion.id);
       await say(discussion.id, "SILENCE", spoken.text, spoken.source);
@@ -316,6 +307,7 @@ async function emitRoster(discussionId: string) {
     serverNow: Date.now(),
     lastSpeechAt: live?.lastSpeechAt ?? Date.now(),
     inviteAfterMs: INVITE_AFTER_MS,
+    openFloorAt: live?.silenceOpenAt ?? null,
     moderated: discussion.moderatorEnabled || hostAway,
     hostAway,
     invite: open ? { userId: open[0], until: open[1].until } : null,

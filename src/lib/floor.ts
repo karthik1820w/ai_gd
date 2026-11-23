@@ -7,8 +7,14 @@
 /** The floor has been open this long (nobody speaking): the AI moderator invites someone. */
 export const INVITE_AFTER_MS = 5_000;
 
-/** The moderator waits this long after the discussion starts before inviting anyone. */
-export const FIRST_INVITE_AFTER_MS = 15_000;
+/** The open-floor response period before the moderator calls on one participant. */
+export const OPEN_FLOOR_RESPONSE_MS = 5_000;
+
+export function nextSilenceAction(input: { quietForMs: number; openFloorAt: number | null; now: number; hasInvite: boolean }): "announce" | "invite" | null {
+  if (input.quietForMs < INVITE_AFTER_MS || input.hasInvite) return null;
+  if (input.openFloorAt == null) return "announce";
+  return input.now - input.openFloorAt >= OPEN_FLOOR_RESPONSE_MS ? "invite" : null;
+}
 
 /** Minimum gap between two moderator messages, so the room is never talked over by the AI. */
 export const PROMPT_COOLDOWN_MS = 6_000;
