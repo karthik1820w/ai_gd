@@ -21,9 +21,9 @@ export function serverSttAvailable() {
  * offline Whisper worker. Returns "" when there is no clear speech and null when neither is available.
  * Throws if the Gemini call fails, so the caller can tell the person.
  */
-export async function transcribeAudio(wav: Buffer): Promise<string | null> {
+export async function transcribeAudio(wav: Buffer, vocabulary = ""): Promise<string | null> {
   if (aiEnabled()) {
-    const raw = await complete(TRANSCRIBE_SYSTEM, "Transcribe this audio clip.", {
+    const raw = await complete(TRANSCRIBE_SYSTEM, `Transcribe this audio clip. Topic and vocabulary for spelling context only: ${vocabulary.slice(0, 1500)}. Preserve the words and meaning that were actually spoken.`, {
       audio: { mimeType: "audio/wav", base64: wav.toString("base64") },
       responseSchema: TRANSCRIBE_SCHEMA,
       retries: 1,

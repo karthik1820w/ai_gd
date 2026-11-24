@@ -81,6 +81,9 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   const [liveScores, setLiveScores] = useState<LiveScore[]>([]);
   const [myScore, setMyScore] = useState<LiveScore | null>(null);
   const [aiOn, setAiOn] = useState(false);
+  const [aiCatchingUp, setAiCatchingUp] = useState(false);
+  const [aiPaused, setAiPaused] = useState(false);
+  const [floorTimer, setFloorTimer] = useState<{ userId: string; until: number; skew: number } | null>(null);
   const [brief, setBrief] = useState<TopicBrief | null>(discussion.brief ?? null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [fatal, setFatal] = useState<string | null>(null);
@@ -141,7 +144,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   const teardownRef = useRef<(background: boolean) => void>(() => undefined);
   const uploadRef = useRef<() => Promise<void>>(async () => undefined);
   const watchedRef = useRef(false);
-  const queueRef = useRef<Array<{ text: string; startedAt: string; endedAt: string; diagnosticId?: string }>>([]);
+  const queueRef = useRef<Array<{ text: string; startedAt: string; endedAt: string; diagnosticId?: string; confidence?: number | null; typed?: boolean }>>([]);
   const diagnosticsEnabledRef = useRef(false);
   const savedRef = useRef(0);
   const aiRef = useRef(false);
@@ -173,12 +176,12 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       setCaptureIssue(result.message || "Your words could not be saved.");
     }
   };
-  function sendLine(line: { text: string; startedAt: string; endedAt: string; diagnosticId?: string }) {
+  function sendLine(line: { text: string; startedAt: string; endedAt: string; diagnosticId?: string; confidence?: number | null; typed?: boolean }) {
     const socket = socketRef.current;
     if (!socket) return;
     // Before the room is joined the server would drop the line, so hold it until it can be saved.
     if (!watchedRef.current) { queueRef.current.push(line); return; }
-    if (diagnosticsEnabledRef.current) socket.emit("transcript-diagnostic", { stage: "captured", eventType: "final", segmentId: line.diagnosticId ?? null, captureId: line.diagnosticId ?? null, startedAt: line.startedAt, endedAt: line.endedAt, text: line.text, confidence: null, silence: false, clientAt: Date.now() });
+    if (diagnosticsEnabledRef.current) socket.emit("transcript-diagnostic", { stage: "captured", eventType: "final", segmentId: line.diagnosticId ?? null, captureId: line.diagnosticId ?? null, startedAt: line.startedAt, endedAt: line.endedAt, text: line.text, confidence: line.confidence ?? null, silence: false, clientAt: Date.now() });
     socket.emit("transcript", line, (result?: { ok: boolean; reason?: string; message?: string; benign?: boolean }) => {
       noteAckRef.current(result);
       // The server had not (re)joined this connection yet: keep the line and send it once it has.
@@ -371,6 +374,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       setInvite(payload.invite ? { userId: payload.invite.userId, name: nameOf(payload.invite.userId), until: payload.invite.until } : null);
     });
     socket.on("speaking-turn", (payload: { userId: string; name: string; until: number }) => setInvite({ userId: payload.userId, name: payload.name, until: payload.until }));
+    socket.on("floor_granted", (payload: { userId: string; until: number }) => setInvite((current) => current?.userId === payload.userId ? { ...current, until: payload.until } : current));
     socket.on("turn-closed", (payload: { userId: string }) => setInvite((current) => (current && current.userId === payload.userId ? null : current)));
     // The AI voice never talks over a person. If anyone is speaking the message waits (and is dropped if it
     // has gone stale), and the moment anyone starts speaking, a message already being read is cut off.
@@ -389,7 +393,22 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       pendingVoiceRef.current = { text: row.message, at: Date.now() };
       flushVoice();
     });
+    socket.on("ai_interrupted", () => {
+      setAiPaused(true);
+      pendingVoiceRef.current = null;
+      window.speechSynthesis?.cancel();
+    });
+    socket.on("ai_resumed", (payload: { context?: string }) => {
+      setAiPaused(false);
+      pushToast(payload.context || "The AI moderator has resumed.");
+    });
+    socket.on("timer_tick", (payload: { userId: string; until: number; remainingMs: number }) => setFloorTimer({ userId: payload.userId, until: payload.until, skew: 0 }));
+    socket.on("floor_ended", (payload: { userId: string }) => setFloorTimer((current) => current?.userId === payload.userId ? null : current));
+    socket.on("floor_extended", (payload: { userId: string; until: number }) => setFloorTimer((current) => current?.userId === payload.userId ? { ...current, until: payload.until } : current));
+    socket.on("hand-denied", () => { handRef.current = false; setHand(false); setMyPlace(null); pushToast("The host declined your request to speak."); });
+    socket.on("hand-approved", (payload: { queued: boolean }) => pushToast(payload.queued ? "The host approved your request. You are next after the current speaker." : "The host approved your request. You have the floor."));
     socket.on("host-status", (payload: { away: boolean }) => setHostAway(Boolean(payload.away)));
+    socket.on("ai-catching-up", (payload: { active: boolean }) => setAiCatchingUp(Boolean(payload.active)));
     socket.on("hand-queue", (payload: { serverNow: number; queue: HandEntry[] }) => setHandQueue({ queue: payload.queue, skew: payload.serverNow - Date.now() }));
     socket.on("hand-position", (payload: { position: number; of: number }) => setMyPlace({ position: payload.position, of: payload.of }));
     socket.on("hand-lowered", () => {
@@ -557,7 +576,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
 
     const ship = (line: CaptureLine | null) => {
       if (!line || audioModeRef.current) return;
-      sendLine({ text: line.text, startedAt: new Date(line.startedAt).toISOString(), endedAt: new Date(line.endedAt).toISOString(), diagnosticId: createCaptureId() });
+      sendLine({ text: line.text, startedAt: new Date(line.startedAt).toISOString(), endedAt: new Date(line.endedAt).toISOString(), diagnosticId: createCaptureId(), confidence: line.confidence });
     };
     const showCaption = (text: string) => {
       const now = Date.now();
@@ -576,7 +595,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
       next.interimResults = true;
       next.lang = lang;
       next.onresult = (event) => {
-        const pieces = Array.from({ length: event.results.length }, (_, index) => ({ transcript: event.results[index][0]?.transcript ?? "", isFinal: event.results[index].isFinal }));
+        const pieces = Array.from({ length: event.results.length }, (_, index) => ({ transcript: event.results[index][0]?.transcript ?? "", isFinal: event.results[index].isFinal, confidence: event.results[index][0]?.confidence ?? null }));
         if (diagnosticsEnabledRef.current && watchedRef.current) {
           for (let index = 0; index < event.results.length; index += 1) {
             const result = event.results[index];
@@ -786,7 +805,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
     const text = typed.trim();
     if (!text) return;
     const now = new Date().toISOString();
-    sendLine({ text, startedAt: now, endedAt: now });
+    sendLine({ text, startedAt: now, endedAt: now, typed: true });
     setTyped("");
   }
 
@@ -811,6 +830,10 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
   }
   function hostGiveFloor(userId: string) {
     socketRef.current?.emit("host-grant-floor", { userId });
+  }
+  function hostApprove(userId: string) {
+    if (floorTimer) socketRef.current?.emit("host-approve-hand", { userId });
+    else hostGiveFloor(userId);
   }
   function hostRemove(person: RosterEntry) {
     const reason = window.prompt(`Remove ${person.name} from the discussion?\n\nThey will see this reason, cannot rejoin, and it is recorded in their report.`, "Disruptive behaviour");
@@ -955,6 +978,8 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
               <p className="rt-code" aria-label={`Room code ${discussion.roomCode ?? ""}`}>{discussion.roomCode ? spacedCode(discussion.roomCode) : "–"}</p>
               <p className="rt-note">Share this code. Participants take a seat when they join.</p>
               {!finished && <button className="rt-btn primary" onClick={endForEveryone}>End and evaluate</button>}
+              {!finished && <div className="rt-actions"><button className="rt-btn" onClick={() => socketRef.current?.emit(aiPaused ? "host-resume-ai" : "host-interrupt-ai")}>{aiPaused ? "Resume AI moderator" : "Interrupt AI"}</button>{aiPaused && <span className="rt-note">AI moderator paused</span>}</div>}
+              {floorTimer && <div className="rt-row"><span>Speaker time left</span><strong>{Math.max(0, Math.ceil((floorTimer.until - tick) / 1000))}s</strong></div>}
               <div className="rt-row"><span>Weak connections</span><strong>{weak}</strong></div>
               <h3>Hand queue</h3>
               {handQueue.queue.length === 0 && <p className="muted">Nobody has a hand up.</p>}
@@ -964,7 +989,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
                     <li key={entry.userId} className="rt-queue-row">
                       <span className="rt-queue-pos" aria-hidden="true">{entry.position}</span>
                       <span className="rt-queue-name"><strong>{entry.name}</strong><span className="rt-note">waiting {Math.max(0, Math.round((tick + handQueue.skew - entry.raisedAt) / 1000))}s · {Math.round(entry.speakingMs / 1000)}s spoken</span></span>
-                      <button className="rt-btn small primary" disabled={speakingIds.size > 0} title={speakingIds.size > 0 ? "Wait until the current speaker finishes" : "Give this person the floor"} onClick={() => hostGiveFloor(entry.userId)}>Give floor</button>
+                      <div className="rt-actions"><button className="rt-btn small primary" onClick={() => hostApprove(entry.userId)}>Approve</button><button className="rt-btn small" onClick={() => socketRef.current?.emit("host-deny-hand", { userId: entry.userId })}>Deny</button></div>
                     </li>
                   ))}
                 </ol>
@@ -980,6 +1005,8 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
                     {person.speechAvailable === false && person.contributions === 0 && <span className="rt-chip warn">Browser cannot transcribe{aiOn ? " (AI fallback)" : ""}</span>}
                     {person.speechAvailable !== false && person.contributions === 0 && person.speakingMs > 10_000 && <span className="rt-chip warn">Heard speaking, no words captured yet</span>}
                     <div className="rt-actions">
+                      <button className="rt-btn small" onClick={() => hostGiveFloor(person.userId)}>Give floor</button>
+                      {floorTimer?.userId === person.userId && <><button className="rt-btn small" onClick={() => socketRef.current?.emit("host-end-turn", { userId: person.userId })}>End turn</button><button className="rt-btn small" onClick={() => socketRef.current?.emit("host-extend-turn", { userId: person.userId })}>+30 s</button></>}
                       <button className={`rt-btn small${micOff ? " on" : ""}`} aria-pressed={micOff} onClick={() => hostMute(person)}>{micOff ? "Allow mic" : "Mute"}</button>
                       <button className="rt-btn small danger" onClick={() => hostRemove(person)}>Remove</button>
                     </div>
@@ -1038,6 +1065,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
                 <button className={`rt-btn${micOn ? "" : " on"}`} aria-pressed={micOn} disabled={locked || (!micOn && (floorBusy() || !hasMicGrant()))} title={!micOn && !hasMicGrant() ? "Wait for the host or AI moderator to give you the floor" : !micOn && floorBusy() ? "Someone is speaking" : undefined} onClick={() => toggleMic()}>{micOn ? <Mic size={16} /> : <MicOff size={16} />} {micOn ? "Mic on" : "Mic off"}</button>
                 <button className={`rt-btn${camOn ? "" : " on"}`} aria-pressed={camOn} disabled={camLocked} onClick={() => toggleCam()}>{camOn ? <Video size={16} /> : <VideoOff size={16} />} {camOn ? "Camera on" : "Camera off"}</button>
                 {!isHost && <button className="rt-btn primary" onClick={speak}>Speak</button>}
+                {!isHost && invite?.userId === user.id && <button className="rt-btn" onClick={() => socketRef.current?.emit("end-turn")}>Done speaking · {Math.max(0, Math.ceil((invite.until - (tick + (floor?.skew ?? 0))) / 1000))}s</button>}
                 {!isHost && <button className={`rt-btn${hand ? " on" : ""}`} aria-pressed={hand} onClick={toggleHand}><Hand size={16} /> {hand ? "Lower hand" : "Raise hand"}</button>}
                 <button className={`rt-btn${screenOn ? " on" : ""}`} aria-pressed={screenOn} onClick={() => void shareScreen()} aria-label="Share screen"><MonitorUp size={16} /></button>
               </div>
@@ -1062,6 +1090,7 @@ export function Room({ discussion, user, code, displayName, initialStream, initi
         {/* Right: the live transcript, and Ask the AI. */}
         <aside className="rt-panel">
           <h3>{isHost ? "Live transcript" : "Your transcript"}</h3>
+          {aiCatchingUp && <p className="rt-note" role="status">AI is catching up…</p>}
           {isHost && guests.length > 1 && (
             <select className="rt-input" aria-label="Show transcript for" value={transcriptFilter} onChange={(event) => setTranscriptFilter(event.target.value)}>
               <option value="all">Everyone</option>

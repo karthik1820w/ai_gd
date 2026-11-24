@@ -5,6 +5,7 @@ import { wavInfo } from "@/lib/audioChunks";
 import { addSegmentResult } from "@/server/segments";
 import { serverSttAvailable, transcribeAudio } from "@/server/transcribeAudio";
 import { logTranscriptDiagnostic } from "@/server/transcriptDiagnostics";
+import { hasFloorAccess, room } from "@/server/activity";
 
 /**
  * Fallback transcription. When a participant's browser cannot transcribe speech itself, their browser
@@ -25,7 +26,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   if (!serverSttAvailable()) return fail("Audio transcription needs a Gemini key or the offline Whisper model, and neither is set up on this server.", 503);
 
   const [discussion, participant] = await Promise.all([
-    prisma.discussion.findUnique({ where: { id }, select: { id: true, hostId: true, status: true, transcriptionEnabled: true, transcriptsPurgedAt: true } }),
+    prisma.discussion.findUnique({ where: { id }, select: { id: true, hostId: true, topic: true, status: true, transcriptionEnabled: true, transcriptsPurgedAt: true, participants: { select: { displayName: true, userId: true, removed: true } } } }),
     prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId: id, userId: user.id } } }),
   ]);
   if (!discussion || !participant) return fail("You are not part of this discussion.", 403);
@@ -34,6 +35,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   if (discussion.status === "COMPLETED" || discussion.status === "CANCELLED") return fail("This discussion has ended.", 409);
   if (!discussion.transcriptionEnabled || discussion.transcriptsPurgedAt) return fail("Transcription is switched off for this discussion.", 409);
   if (!participant.transcriptionConsent) return fail("Your transcription consent was not recorded. Leave, rejoin, and tick the consent box.", 403);
+  const live = room(id);
+  if (!hasFloorAccess(id, user.id) || !live.presence.get(user.id)?.audio) return fail("Audio transcription is available only while you hold the floor.", 403);
 
   const declared = Number(request.headers.get("content-length") ?? 0);
   if (declared > MAX_BYTES) return fail("That clip is too large.", 413);
@@ -48,7 +51,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
   let text: string | null;
   try {
-    text = await transcribeAudio(Buffer.from(bytes));
+    const names = discussion.participants.filter((person) => !person.removed).map((person) => person.displayName).join(", ");
+    text = await transcribeAudio(Buffer.from(bytes), `${discussion.topic}; participant names: ${names}`);
   } catch (caught) {
     console.error("Audio transcription failed.", caught);
     return fail("The transcription service did not answer. Your words were not saved; try again or type your points.", 502);

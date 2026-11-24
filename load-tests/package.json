@@ -1,0 +1,27 @@
+{
+  "name": "quorum-load-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Load-test harness, mock providers and metrics collectors for Quorum (ai_gd). Isolated from the app's own package.json.",
+  "type": "module",
+  "scripts": {
+    "pg": "node infra/embedded-postgres.mjs",
+    "mock:gemini": "node mocks/gemini-mock.mjs",
+    "collector": "node metrics/collector.mjs",
+    "scenario:a": "node runner/run.mjs --scenario=A",
+    "scenario:b": "node runner/run.mjs --scenario=B",
+    "scenario:c": "node runner/run.mjs --scenario=C",
+    "scenario:d": "node runner/run.mjs --scenario=D",
+    "scenario:e": "node runner/run.mjs --scenario=E",
+    "scenario:f": "node runner/run.mjs --scenario=F",
+    "scenario:g": "node runner/run.mjs --scenario=G",
+    "scenario:h": "node runner/run.mjs --scenario=H",
+    "scenario:i": "node runner/run.mjs --scenario=I",
+    "wer": "node analysis/wer.mjs"
+  },
+  "dependencies": {
+    "embedded-postgres": "^17.2.0-beta.15",
+    "socket.io-client": "^4.8.1",
+    "playwright": "^1.56.1"
+  }
+}

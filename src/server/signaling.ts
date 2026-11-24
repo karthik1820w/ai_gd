@@ -14,6 +14,10 @@ import {
   sampleNetQuality,
   speakStart,
   speakStop,
+  grantFloor,
+  endFloor,
+  extendFloor,
+  SPEAKING_TURN_MS,
   setPresence,
   noteSpeech,
 } from "@/server/activity";
@@ -27,7 +31,7 @@ import { tokenFromCookie, verifyToken, type TokenUser } from "@/server/token";
 import { createBucket, createRealtimeBuckets, take } from "@/server/rateLimit";
 import { NOTICE } from "@/server/netQuality";
 import { logEvent } from "@/server/journal";
-import { aiEnabled, complete, parseJson } from "@/server/ai";
+import { aiEnabled, complete, interruptRoomAI, parseJson } from "@/server/ai";
 import { serverSttAvailable } from "@/server/transcribeAudio";
 import { aliasPeople, aliasText, deAlias, ANSWER_SCHEMA, taskPrompt } from "@/server/aiPrompts";
 import { readBrief } from "@/server/brief";
@@ -337,6 +341,91 @@ export function attachSignaling(io: Server) {
       publishRoster(discussionId);
     });
 
+    socket.on("end-turn", async () => {
+      const discussionId = socket.data.discussionId;
+      if (!discussionId || !endFloor(discussionId, socket.data.user.id)) return;
+      await revokeFloorAudio(discussionId, socket.data.user.id);
+      emitDiscussion(discussionId, "floor_ended", { userId: socket.data.user.id, reason: "done" });
+      logEvent(discussionId, "floor-ended", { userId: socket.data.user.id, reason: "done" });
+      publishRoster(discussionId);
+    });
+
+    socket.on("host-end-turn", async (payload: { userId?: string }) => {
+      if (!allowEvent(1)) return;
+      const discussion = await hostDiscussion(socket);
+      const userId = payload?.userId;
+      if (!discussion || !userId || !endFloor(discussion.id, userId)) return;
+      await revokeFloorAudio(discussion.id, userId);
+      emitDiscussion(discussion.id, "floor_ended", { userId, reason: "host" });
+      logEvent(discussion.id, "floor-ended", { userId, reason: "host" });
+      publishRoster(discussion.id);
+    });
+
+    socket.on("host-interrupt-ai", async () => {
+      if (!allowEvent(1)) return;
+      const discussion = await hostDiscussion(socket);
+      if (!discussion) return;
+      const live = room(discussion.id);
+      live.aiPaused = true;
+      interruptRoomAI(discussion.id);
+      emitDiscussion(discussion.id, "ai_interrupted", { at: Date.now(), hostId: socket.data.user.id });
+      logEvent(discussion.id, "ai-interrupted", { hostId: socket.data.user.id });
+    });
+
+    socket.on("host-resume-ai", async () => {
+      if (!allowEvent(1)) return;
+      const discussion = await hostDiscussion(socket);
+      if (!discussion) return;
+      const live = room(discussion.id);
+      live.aiPaused = false;
+      const context = live.floor ? "A host interrupted the moderator. The current speaker still has the floor; continue after their turn." : "A host interrupted the moderator. Resume naturally and defer to the raised-hand queue.";
+      live.moderatorContext = context;
+      emitDiscussion(discussion.id, "ai_resumed", { context, at: Date.now() });
+      logEvent(discussion.id, "ai-resumed", { context });
+    });
+
+    socket.on("host-deny-hand", async (payload: { userId?: string }) => {
+      if (!allowEvent(1)) return;
+      const discussion = await hostDiscussion(socket);
+      if (!discussion || !payload?.userId) return;
+      const live = room(discussion.id);
+      live.hands = live.hands.filter((id) => id !== payload.userId);
+      live.handRaisedAt.delete(payload.userId);
+      live.approvedQueue = live.approvedQueue.filter((id) => id !== payload.userId);
+      live.approvedQueue = live.approvedQueue.filter((id) => id !== payload.userId);
+      const presence = live.presence.get(payload.userId);
+      if (presence) presence.hand = false;
+      emitUser(payload.userId, "hand-denied", {});
+      logEvent(discussion.id, "hand-denied", { userId: payload.userId });
+      publishRoster(discussion.id);
+    });
+
+    socket.on("host-approve-hand", async (payload: { userId?: string }) => {
+      if (!allowEvent(1)) return;
+      const discussion = await hostDiscussion(socket);
+      if (!discussion || !payload?.userId) return;
+      const live = room(discussion.id);
+      const participant = await prisma.discussionParticipant.findUnique({ where: { discussionId_userId: { discussionId: discussion.id, userId: payload.userId } } });
+      if (!participant || participant.removed || participant.micLocked || !live.presence.get(payload.userId)?.connected) return;
+      if (!live.handRaisedAt.has(payload.userId)) return;
+      if (!live.approvedQueue.includes(payload.userId)) live.approvedQueue.push(payload.userId);
+      emitUser(payload.userId, "hand-approved", { queued: Boolean(live.floor) });
+      logEvent(discussion.id, "hand-approved", { userId: payload.userId, queued: Boolean(live.floor) });
+      publishRoster(discussion.id);
+    });
+
+    socket.on("host-extend-turn", async (payload: { userId?: string }) => {
+      if (!allowEvent(1)) return;
+      const discussion = await hostDiscussion(socket);
+      const userId = payload?.userId;
+      const floor = discussion && userId ? extendFloor(discussion.id, userId) : null;
+      if (!discussion || !floor || !userId) return;
+      const invite = room(discussion.id).invites.get(userId);
+      if (invite) invite.until = floor.until;
+      emitDiscussion(discussion.id, "floor_extended", { userId, until: floor.until });
+      logEvent(discussion.id, "floor-extended", { userId, seconds: 30 });
+    });
+
     // Every spoken line is answered: saved, or the reason it was not. The browser shows that reason, so a
     // missing transcript is never a mystery.
     socket.on("transcript-diagnostic", (payload: { stage?: string; eventType?: string; segmentId?: string | null; captureId?: string | null; startedAt?: string | null; endedAt?: string | null; text?: string; confidence?: number | null; silence?: boolean | null; clientAt?: number }) => {
@@ -359,7 +448,7 @@ export function attachSignaling(io: Server) {
       });
     });
 
-    socket.on("transcript", async (payload: { text?: string; startedAt?: string; endedAt?: string; diagnosticId?: string }, ack?: (result: { ok: boolean; reason?: string; message?: string; benign?: boolean }) => void) => {
+    socket.on("transcript", async (payload: { text?: string; startedAt?: string; endedAt?: string; diagnosticId?: string; confidence?: number | null; typed?: boolean }, ack?: (result: { ok: boolean; reason?: string; message?: string; benign?: boolean }) => void) => {
       const reply = typeof ack === "function" ? ack : () => undefined;
       if (!take(realtimeBuckets.transcript)) {
         reply({ ok: false, reason: "rate", message: "Too many lines at once. Speak in shorter sentences.", benign: true });
@@ -367,9 +456,16 @@ export function attachSignaling(io: Server) {
       }
       if (!socket.data.discussionId) { reply({ ok: false, reason: "not-joined", message: "You have not joined this discussion yet.", benign: false }); return; }
       if (!payload?.text) { reply({ ok: false, reason: "empty", message: "Nothing to save.", benign: true }); return; }
+      if (!payload.typed) {
+        const media = room(socket.data.discussionId).presence.get(socket.data.user.id);
+        if (!media?.audio || !hasFloorAccess(socket.data.discussionId, socket.data.user.id)) {
+          reply({ ok: false, reason: "floor", message: "Speech can only be transcribed while you hold the floor.", benign: true });
+          return;
+        }
+      }
       logEvent(socket.data.discussionId, "speech", { userId: socket.data.user.id, text: payload.text });
       try {
-        const result = await addSegmentResult({ discussionId: socket.data.discussionId, userId: socket.data.user.id, text: payload.text, startedAt: payload.startedAt, endedAt: payload.endedAt, diagnosticId: payload.diagnosticId });
+        const result = await addSegmentResult({ discussionId: socket.data.discussionId, userId: socket.data.user.id, text: payload.text, startedAt: payload.startedAt, endedAt: payload.endedAt, diagnosticId: payload.diagnosticId, confidence: payload.confidence });
         reply(result.ok ? { ok: true } : { ok: false, reason: result.reason, message: result.message, benign: result.benign });
       } catch (error) {
         console.error("Could not save a transcript line.", error);
@@ -528,12 +624,15 @@ export function attachSignaling(io: Server) {
       if (!participant || participant.removed) return;
       if (participant.micLocked) { socket.emit("host-notice", { message: `${participant.displayName} is muted. Allow their microphone first.` }); return; }
       if (consumeHand(discussion.id, payload.userId)) emitUser(payload.userId, "hand-lowered", {});
-      const seconds = discussion.speakingTimeSec;
-      const until = Date.now() + seconds * 1000;
-      live.invites.set(payload.userId, { participantId: participant.id, until, sawUnmute: Boolean(presence.audio), windowSec: seconds });
+      const seconds = Math.round(SPEAKING_TURN_MS / 1000);
+      const granted = grantFloor(discussion.id, payload.userId);
+      if (!granted) { socket.emit("host-notice", { message: "Someone else currently holds the floor." }); return; }
+      const until = granted.until;
+      live.invites.set(payload.userId, { participantId: participant.id, until: granted.graceUntil, sawUnmute: Boolean(presence.audio), windowSec: seconds + Math.ceil((granted.graceUntil - granted.until) / 1000) });
       const message = `${participant.displayName}, the host has given you the floor. You have about ${seconds} seconds.`;
       await say(discussion.id, "INVITE", message, "host", payload.userId);
       emitDiscussion(discussion.id, "speaking-turn", { userId: payload.userId, name: participant.displayName, until, message });
+      emitDiscussion(discussion.id, "floor_granted", { userId: payload.userId, until: granted.until });
       logEvent(discussion.id, "host-grant-floor", { targetUserId: payload.userId });
       publishRoster(discussion.id);
     });
@@ -599,6 +698,17 @@ async function hostDiscussion(socket: { data: { user: TokenUser; discussionId?: 
   const discussion = await prisma.discussion.findUnique({ where: { id: socket.data.discussionId } });
   if (!discussion || discussion.hostId !== socket.data.user.id) return null;
   return discussion;
+}
+
+async function revokeFloorAudio(discussionId: string, userId: string) {
+  const live = room(discussionId);
+  const media = live.presence.get(userId);
+  if (!media?.audio) return;
+  media.audio = false;
+  emitUser(userId, "floor-revoked", {});
+  emitDiscussion(discussionId, "media", { userId, audio: false, video: media.video, hand: media.hand, screen: media.screen });
+  const discussion = await prisma.discussion.findUnique({ where: { id: discussionId }, select: { meetingId: true } });
+  if (discussion) await muteLivekitAudio(discussion.meetingId, userId, true).catch(() => undefined);
 }
 
 async function leave(socket: { id: string; data: { user?: TokenUser; discussionId?: string }; to: (room: string) => { emit: (event: string, payload: unknown) => void } }) {

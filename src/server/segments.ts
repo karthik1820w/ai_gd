@@ -53,6 +53,8 @@ export type SegmentDTO = {
   userId: string;
   name: string;
   text: string;
+  confidence: number | null;
+  lowConfidence: boolean;
   startedAt: string;
   endedAt: string;
   relevance: string;
@@ -75,6 +77,8 @@ export function segmentDTO(segment: {
   id: string;
   participantId: string;
   text: string;
+  confidence: number | null;
+  lowConfidence: boolean;
   startedAt: Date;
   endedAt: Date;
   relevance: string;
@@ -99,6 +103,8 @@ export function segmentDTO(segment: {
     userId: segment.participant.userId,
     name: segment.participant.displayName,
     text: segment.text,
+    confidence: segment.confidence,
+    lowConfidence: segment.lowConfidence,
     startedAt: segment.startedAt.toISOString(),
     endedAt: segment.endedAt.toISOString(),
     relevance: segment.relevance,
@@ -239,7 +245,7 @@ export type SegmentResult =
  * "no transcript" and nobody knows. Timing comes from the server clock (the person's own clock can be
  * wrong); only the line's length, which is clock-independent, is taken from the browser.
  */
-export async function addSegmentResult(input: { discussionId: string; userId: string; text: string; startedAt?: string; endedAt?: string; source?: "live" | "recording"; diagnosticId?: string }): Promise<SegmentResult> {
+export async function addSegmentResult(input: { discussionId: string; userId: string; text: string; startedAt?: string; endedAt?: string; source?: "live" | "recording"; diagnosticId?: string; confidence?: number | null }): Promise<SegmentResult> {
   const reject = (reason: SegmentRejection): SegmentResult => ({ ok: false, reason, ...REJECTIONS[reason] });
   const text = input.text.replace(/\s+/g, " ").trim();
   const words = wordCount(text);
@@ -318,6 +324,9 @@ export async function addSegmentResult(input: { discussionId: string; userId: st
       discussionId: discussion.id,
       participantId: participant.id,
       text,
+      rawText: input.text.slice(0, 2000),
+      confidence: typeof input.confidence === "number" && Number.isFinite(input.confidence) ? Math.max(0, Math.min(1, input.confidence)) : null,
+      lowConfidence: typeof input.confidence === "number" && input.confidence < (Number.parseFloat(process.env.TRANSCRIPT_LOW_CONFIDENCE || "0.55") || 0.55),
       startedAt: started,
       endedAt: ended,
       wordCount: words,

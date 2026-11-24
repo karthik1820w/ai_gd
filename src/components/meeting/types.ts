@@ -40,6 +40,8 @@ export type Segment = {
   userId: string;
   name: string;
   text: string;
+  confidence?: number | null;
+  lowConfidence?: boolean;
   startedAt: string;
   endedAt?: string;
   relevance: string;

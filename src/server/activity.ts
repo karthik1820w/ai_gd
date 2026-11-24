@@ -22,7 +22,12 @@ export type Invite = {
 export type FloorState = {
   userId: string;
   since: number;
+  until: number;
+  graceUntil: number;
 };
+
+export const SPEAKING_TURN_MS = Math.max(1_000, Number.parseInt(process.env.SPEAKING_TURN_MS || "60000", 10) || 60_000);
+export const SPEAKING_GRACE_MS = Math.max(0, Number.parseInt(process.env.SPEAKING_GRACE_MS || "5000", 10) || 0);
 
 export type Room = {
   lastSpeechAt: number;
@@ -36,9 +41,12 @@ export type Room = {
   lastTick: Map<string, number>;
   started: boolean;
   floor: FloorState | null;
+  aiPaused: boolean;
+  moderatorContext: string;
   hands: string[];
   /** When each person's hand went up. The hand queue is this map in time order: first raised, first served. */
   handRaisedAt: Map<string, number>;
+  approvedQueue: string[];
   /** The host has been out of the room long enough that the AI moderator is running it. */
   hostAway: boolean;
   /** When the host was first seen missing (null while the host is present). */
@@ -69,8 +77,11 @@ export function room(discussionId: string): Room {
       lastTick: new Map(),
       started: false,
       floor: null,
+      aiPaused: false,
+      moderatorContext: "",
       hands: [],
       handRaisedAt: new Map(),
+      approvedQueue: [],
       hostAway: false,
       hostMissingSince: null,
       hostAwayAnnounced: false,
@@ -117,7 +128,8 @@ export function speakStart(discussionId: string, userId: string, allowInterrupt 
   }
 
   if (!current.floor || allowInterrupt) {
-    current.floor = { userId, since: Date.now() };
+    const since = Date.now();
+    current.floor = { userId, since, until: since + SPEAKING_TURN_MS, graceUntil: since + SPEAKING_TURN_MS + SPEAKING_GRACE_MS };
     current.turns.set(userId, (current.turns.get(userId) ?? 0) + 1);
   }
   current.speaking.add(userId);
@@ -138,11 +150,35 @@ export function speakStop(discussionId: string, userId: string): boolean {
   current.lastSpeechAt = Date.now();
   current.lastSpokeAtMap.set(userId, Date.now());
 
-  if (current.floor?.userId === userId) {
-    current.floor = null;
-    return true;
-  }
-  return false;
+  // A voice activity pause is not an end-of-turn signal. The authoritative timer,
+  // an explicit participant Done action, or the host releases the floor.
+  return current.floor?.userId === userId;
+}
+
+export function grantFloor(discussionId: string, userId: string, now = Date.now()) {
+  const current = room(discussionId);
+  if (current.floor && current.floor.userId !== userId) return null;
+  current.floor = { userId, since: now, until: now + SPEAKING_TURN_MS, graceUntil: now + SPEAKING_TURN_MS + SPEAKING_GRACE_MS };
+  current.invites.delete(userId);
+  return current.floor;
+}
+
+export function endFloor(discussionId: string, userId: string) {
+  const current = rooms.get(discussionId);
+  if (current?.floor?.userId !== userId) return false;
+  current.floor = null;
+  current.speaking.delete(userId);
+  current.invites.delete(userId);
+  current.lastSpeechAt = Date.now();
+  return true;
+}
+
+export function extendFloor(discussionId: string, userId: string, extraMs = 30_000) {
+  const floor = rooms.get(discussionId)?.floor;
+  if (!floor || floor.userId !== userId) return null;
+  floor.until += extraMs;
+  floor.graceUntil += extraMs;
+  return floor;
 }
 
 /** Voice began for this person. Counts even when someone else holds the floor. */
@@ -170,6 +206,7 @@ export function lowerHand(discussionId: string, userId: string): void {
   const current = room(discussionId);
   current.hands = current.hands.filter((h) => h !== userId);
   current.handRaisedAt.delete(userId);
+  current.approvedQueue = current.approvedQueue.filter((id) => id !== userId);
 }
 
 /**
@@ -197,6 +234,7 @@ export function consumeHand(discussionId: string, userId: string): boolean {
   if (media) media.hand = false;
   current.hands = current.hands.filter((id) => id !== userId);
   current.handRaisedAt.delete(userId);
+  current.approvedQueue = current.approvedQueue.filter((id) => id !== userId);
   return wasUp;
 }
 
@@ -228,15 +266,12 @@ export function hasFloorAccess(discussionId: string, userId: string, isHost = fa
  * End-of-turn detection: auto-releases the floor if the floor holder
  * has been completely silent for longer than `timeoutMs` (default 8s).
  */
-export function checkFloorTimeout(discussionId: string, timeoutMs = 8000): string | null {
+export function checkFloorTimeout(discussionId: string, _timeoutMs = 8000): string | null {
   const current = rooms.get(discussionId);
   if (!current?.floor) return null;
 
   const now = Date.now();
-  const lastTick = current.lastTick.get(current.floor.userId) ?? current.floor.since;
-  const lastActivity = Math.max(lastTick, current.lastSpeechAt);
-
-  if (now - lastActivity >= timeoutMs) {
+  if (now >= current.floor.graceUntil) {
     const timedOutSpeaker = current.floor.userId;
     current.floor = null;
     current.speaking.delete(timedOutSpeaker);
@@ -285,6 +320,7 @@ export function clearPresence(discussionId: string, userId: string, socketId: st
   current.speaking.delete(userId);
   current.hands = current.hands.filter((id) => id !== userId);
   current.handRaisedAt.delete(userId);
+  current.approvedQueue = current.approvedQueue.filter((id) => id !== userId);
   if (current.floor?.userId === userId) {
     current.floor = null;
     current.lastSpeechAt = Date.now();

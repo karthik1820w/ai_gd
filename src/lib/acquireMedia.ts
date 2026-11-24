@@ -8,7 +8,7 @@ export type Acquired = { stream: MediaStream; hasAudio: boolean; hasVideo: boole
 export async function acquireMedia(audioId = "", videoId = ""): Promise<Acquired> {
   const devices = navigator.mediaDevices;
   if (!devices?.getUserMedia) return { stream: new MediaStream(), hasAudio: false, hasVideo: false, note: "This browser cannot open a microphone or camera. You can still join to listen." };
-  const audio = (): MediaTrackConstraints | boolean => (audioId ? { deviceId: { ideal: audioId }, echoCancellation: true, noiseSuppression: true } : { echoCancellation: true, noiseSuppression: true });
+  const audio = (): MediaTrackConstraints | boolean => (audioId ? { deviceId: { ideal: audioId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } : { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 });
   const video = (): MediaTrackConstraints | boolean => (videoId ? { deviceId: { ideal: videoId } } : true);
   const attempts: Array<{ audio: boolean; video: boolean; note: string }> = [
     { audio: true, video: true, note: "" },

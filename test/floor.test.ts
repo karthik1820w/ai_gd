@@ -8,6 +8,7 @@ import {
   raiseHand,
   lowerHand,
   checkFloorTimeout,
+  endFloor,
   setPresence,
   hasFloorAccess,
 } from "../src/server/activity.ts";
@@ -36,13 +37,14 @@ describe("authoritative floor controller & end-of-turn detection", () => {
     assert.equal(r.floor?.userId, "user-A");
   });
 
-  it("releases floor cleanly when speaker finishes", () => {
+  it("keeps the floor across a short pause until an explicit end action", () => {
     speakStart(dId, "user-A");
     assert.equal(room(dId).floor?.userId, "user-A");
 
     const stopped = speakStop(dId, "user-A");
     assert.equal(stopped, true);
-    assert.equal(room(dId).floor, null);
+    assert.equal(room(dId).floor?.userId, "user-A");
+    assert.equal(endFloor(dId, "user-A"), true);
 
     // Now User B can take the floor
     const okB = speakStart(dId, "user-B");
@@ -81,7 +83,7 @@ describe("authoritative floor controller & end-of-turn detection", () => {
     assert.deepEqual(r.hands, []);
   });
 
-  it("auto-releases silent floor holder after timeout (end-of-turn detection)", async () => {
+  it("does not release a silent floor before the server turn timer expires", async () => {
     speakStart(dId, "user-A");
     assert.equal(room(dId).floor?.userId, "user-A");
 
@@ -90,9 +92,8 @@ describe("authoritative floor controller & end-of-turn detection", () => {
     assert.equal(releasedImmediately, null);
     assert.equal(room(dId).floor?.userId, "user-A");
 
-    // Wait 60ms and check with 50ms timeout threshold
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    const releasedTimedOut = checkFloorTimeout(dId, 50);
+    room(dId).floor!.graceUntil = Date.now() - 1;
+    const releasedTimedOut = checkFloorTimeout(dId);
     assert.equal(releasedTimedOut, "user-A");
     assert.equal(room(dId).floor, null); // Floor is now free!
   });

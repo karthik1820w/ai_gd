@@ -199,6 +199,9 @@ model TranscriptSegment {
   discussionId          String
   participantId         String
   text                  String
+  rawText               String                 @default("")
+  confidence            Float?
+  lowConfidence         Boolean                @default(false)
   startedAt             DateTime
   endedAt               DateTime
   relevance             Relevance              @default(PENDING)

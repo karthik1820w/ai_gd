@@ -9,8 +9,8 @@
  *  - Waiting for a long quiet gap before sending delays the line the host is watching.
  */
 
-export type RecognitionPiece = { transcript: string; isFinal: boolean };
-export type CaptureLine = { text: string; startedAt: number; endedAt: number };
+export type RecognitionPiece = { transcript: string; isFinal: boolean; confidence?: number | null };
+export type CaptureLine = { text: string; startedAt: number; endedAt: number; confidence?: number | null };
 
 export type AssemblerOptions = {
   /** Send a line this long after the last final result (ms). */
@@ -47,6 +47,7 @@ export class SpeechAssembler {
   private pendingStart = 0;
   private phraseStart = 0;
   private lastFinalAt = 0;
+  private confidences: number[] = [];
 
   constructor(options: AssemblerOptions = {}) {
     this.quietMs = options.quietMs ?? 350;
@@ -68,13 +69,13 @@ export class SpeechAssembler {
     for (let i = 0; i < results.length; i += 1) {
       const text = norm(results[i].transcript);
       if (!results[i].isFinal) { interim = norm(`${interim} ${text}`); continue; }
-      this.takeFinal(i, text, now);
+      this.takeFinal(i, text, now, results[i].confidence);
     }
     if (interim && !this.phraseStart) this.phraseStart = now;
     return { caption: norm(`${this.pending} ${interim}`) };
   }
 
-  private takeFinal(index: number, text: string, now: number) {
+  private takeFinal(index: number, text: string, now: number, confidence?: number | null) {
     if (!text) return;
     const before = this.seen[index];
     let fresh = text;
@@ -89,6 +90,7 @@ export class SpeechAssembler {
     if (!this.pending) this.pendingStart = this.phraseStart || now;
     this.phraseStart = 0;
     this.pending = norm(`${this.pending} ${fresh}`);
+    if (typeof confidence === "number" && Number.isFinite(confidence)) this.confidences.push(Math.max(0, Math.min(1, confidence)));
     this.lastFinalAt = now;
   }
 
@@ -107,9 +109,11 @@ export class SpeechAssembler {
   }
 
   private take(now: number): CaptureLine {
-    const line = { text: this.pending, startedAt: this.pendingStart, endedAt: Math.max(now, this.pendingStart) };
+    const confidence = this.confidences.length ? this.confidences.reduce((sum, value) => sum + value, 0) / this.confidences.length : null;
+    const line = { text: this.pending, startedAt: this.pendingStart, endedAt: Math.max(now, this.pendingStart), confidence };
     this.pending = "";
     this.pendingStart = 0;
+    this.confidences = [];
     return line;
   }
 }

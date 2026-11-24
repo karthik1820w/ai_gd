@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { aiEnabled, complete, parseJson } from "@/server/ai";
 import { aliasPeople, aliasText, deAlias, MODERATOR_SCHEMA, taskPrompt, type AliasEntry } from "@/server/aiPrompts";
-import { checkFloorTimeout, handQueue, markLive, markVoiceStop, recordInvite, rememberPrompt, room, snapshot } from "@/server/activity";
+import { checkFloorTimeout, grantFloor, handQueue, markLive, markVoiceStop, recordInvite, rememberPrompt, room, snapshot, SPEAKING_TURN_MS } from "@/server/activity";
 import { emitDiscussion, emitUser } from "@/server/realtime";
 import { FLOOR_STALE_MS, INVITE_AFTER_MS, nextHostWatch, nextSilenceAction, PROMPT_COOLDOWN_MS, shouldAutoEnd } from "@/lib/floor";
 import { endDiscussion } from "@/server/evaluate";
@@ -42,7 +42,7 @@ async function promptText(
   try {
     const raw = await complete(
       taskPrompt("MODERATOR", "Write one open-ended question of at most 25 words for a group discussion. Build on a recent point or a rubric item if available. Do not add facts, judge participants, or discuss scores. Keep the invited participant's alias as the addressee; the server will restore their name. Return JSON with one string field question."),
-      `Situation: ${situation}\n<briefing>${aliasText(briefing, aliases)}</briefing>\n<draft>${aliasText(fallback, aliases)}</draft>\n<recent_transcript>\n${context}\n</recent_transcript>`,
+      `Situation: ${situation}\nHost update: ${discussionId ? snapshot(discussionId)?.moderatorContext || "none" : "none"}\n<briefing>${aliasText(briefing, aliases)}</briefing>\n<draft>${aliasText(fallback, aliases)}</draft>\n<recent_transcript>\n${context}\n</recent_transcript>`,
       { tier: "flash", timeoutMs: situation === "INVITE" ? 2500 : 20_000, retries: situation === "INVITE" ? 0 : 2, responseSchema: MODERATOR_SCHEMA, roomId: discussionId },
     );
     if (!raw) return { text: fallback, source: "template" };
@@ -58,10 +58,12 @@ async function promptText(
 }
 
 export async function say(discussionId: string, situation: string, message: string, source: string, targetUserId?: string) {
+  if (snapshot(discussionId)?.aiPaused && source !== "host") return;
   const row = await prisma.moderatorEvent.create({
     data: { discussionId, situation, message, source, targetUserId },
   });
   rememberPrompt(discussionId, situation);
+  if (source !== "host") room(discussionId).moderatorContext = "";
   logEvent(discussionId, "moderator", { situation, message, source, targetUserId });
   emitDiscussion(discussionId, "moderator", {
     id: row.id,
@@ -91,6 +93,12 @@ export async function moderateLive() {
   for (const discussion of discussions) {
     const live = snapshot(discussion.id) ?? room(discussion.id);
     markLive(discussion.id);
+
+    if (live.floor) {
+      const remainingMs = Math.max(0, live.floor.until - now);
+      emitDiscussion(discussion.id, "timer_tick", { userId: live.floor.userId, until: live.floor.until, remainingMs });
+      if (remainingMs <= 10_000 && remainingMs > 9_000) emitDiscussion(discussion.id, "timer_warning", { userId: live.floor.userId, seconds: 10 });
+    }
 
     // A speaker whose "stopped" report never arrived must not hold the floor for ever.
     const released = checkFloorTimeout(discussion.id, FLOOR_STALE_MS);
@@ -130,11 +138,13 @@ export async function moderateLive() {
       continue;
     }
 
+    if (live.aiPaused) continue;
+
     // While the host is away the AI moderator runs the room even if the host had switched it off.
     if (!discussion.moderatorEnabled && !live.hostAway) continue;
     await closeExpiredInvites(discussion.id);
     // Never talk over anyone: every moderator message waits for a free floor.
-    if (live.speaking.size > 0) continue;
+    if (live.speaking.size > 0 || live.floor) continue;
 
     if (live.hostAway && !live.hostAwayAnnounced) {
       live.hostAwayAnnounced = true;
@@ -199,12 +209,13 @@ export async function moderateLive() {
           online: Boolean(live.presence?.get(p.userId)?.connected),
         }));
 
-      const queued = handQueue(discussion.id).map((entry) => candidates.find((candidate) => candidate.id === entry.userId)).find(Boolean);
+      const approved = live.approvedQueue.map((userId) => candidates.find((candidate) => candidate.id === userId)).find(Boolean);
+      const queued = approved ?? handQueue(discussion.id).map((entry) => candidates.find((candidate) => candidate.id === entry.userId)).find(Boolean);
       const nextSpeaker = queued ?? pickRandomNextSpeaker(candidates);
       if (nextSpeaker) {
         const candidateParticipant = active.find((p) => p.userId === nextSpeaker.id);
         if (candidateParticipant) {
-          const seconds = discussion.speakingTimeSec;
+          const seconds = Math.round(SPEAKING_TURN_MS / 1000);
           const handRaised = Boolean(queued);
           const fallback = handRaised
             ? `${candidateParticipant.displayName}, you raised your hand. Please go ahead, you have about ${seconds} seconds.`
@@ -212,20 +223,23 @@ export async function moderateLive() {
           const spoken = { text: fallback, source: "template" };
           // Somebody may have started speaking while the question was being written: never talk over them.
           if (live.speaking.size > 0) continue;
+          const granted = grantFloor(discussion.id, nextSpeaker.id);
+          if (!granted) continue;
           live.invites.set(nextSpeaker.id, {
             participantId: candidateParticipant.id,
-            until: Date.now() + seconds * 1000,
+            until: granted.graceUntil,
             sawUnmute: Boolean(live.presence.get(nextSpeaker.id)?.audio),
-            windowSec: seconds,
+            windowSec: seconds + Math.ceil((granted.graceUntil - granted.until) / 1000),
           });
           recordInvite(discussion.id, nextSpeaker.id);
           live.silenceOpenAt = now;
           live.situations.add(`INVITE-${nextSpeaker.id}`);
           await say(discussion.id, "INVITE", spoken.text, spoken.source, nextSpeaker.id);
+          emitDiscussion(discussion.id, "floor_granted", { userId: nextSpeaker.id, until: granted.until });
           emitDiscussion(discussion.id, "speaking-turn", {
             userId: nextSpeaker.id,
             name: candidateParticipant.displayName,
-            until: Date.now() + seconds * 1000,
+            until: granted.until,
             message: spoken.text,
           });
           continue;
